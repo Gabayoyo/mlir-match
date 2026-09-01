@@ -67,3 +67,8 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Python virtualenv and uv toolchain
+.venv/
+.uv-cache/
+.uv-python/
