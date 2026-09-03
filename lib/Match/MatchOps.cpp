@@ -1,5 +1,6 @@
 #include "Match/MatchOps.h"
 #include "Match/MatchAttrs.h"
+#include "Match/MatchTypes.h"
 
 namespace mlir {
 namespace match {
@@ -22,12 +23,41 @@ LogicalResult checkYield(MatchOp match, Region &region) {
   return success();
 }
 
-// Number of values a pattern binds: each nested "bind" contributes one.
-unsigned countBindings(PatternAttr pattern) {
-  unsigned count = pattern.getKind() == "bind" ? 1 : 0;
-  for (PatternAttr sub : pattern.getSubpatterns())
-    count += countBindings(sub);
-  return count;
+// Recursively check that a pattern matches the expected type
+LogicalResult checkPattern(MatchOp match, PatternAttr pattern, Type expectedType,
+                           SmallVectorImpl<Type> &bindings) {
+  StringRef kind = pattern.getKind();
+  if (kind == "bind") {
+    bindings.push_back(expectedType);
+    return success();
+  }
+  if (kind == "wildcard")
+    return success();
+  if (kind == "literal") {
+    IntegerAttr payload = pattern.getPayload();
+    if (payload && payload.getType() != expectedType)
+      return match.emitOpError("literal pattern payload type ")
+             << payload.getType()
+             << " does not match the expected type " << expectedType;
+    return success();
+  }
+
+  // constructor pattern, taken from the dialect's constructor table
+  std::optional<ConstructorDescriptor> constructor =
+      lookupConstructor(expectedType, kind);
+  if (!constructor)
+    return match.emitOpError("pattern kind '")
+           << kind << "' is not a constructor of " << expectedType;
+  ArrayRef<PatternAttr> subpatterns = pattern.getSubpatterns();
+  if (subpatterns.size() != constructor->fieldTypes.size())
+    return match.emitOpError("constructor '")
+           << kind << "' expects " << constructor->fieldTypes.size()
+           << " sub-pattern(s) but has " << subpatterns.size();
+  for (auto [subpattern, fieldType] :
+       llvm::zip(subpatterns, constructor->fieldTypes))
+    if (failed(checkPattern(match, subpattern, fieldType, bindings)))
+      return failure();
+  return success();
 }
 
 } // namespace
@@ -56,35 +86,35 @@ LogicalResult MatchOp::verify() {
         }
     }
 
-    // each arm's entry block arguments are the values its pattern binds
+    // Check each arm's pattern against the scrutinee type, and check that the arm's
+    // block arguments match the types of the values bound by the pattern.
     if (patterns) {
-      for (auto [index, patternValue] : llvm::enumerate(*patterns)) {
-        auto pattern = cast<PatternAttr>(patternValue);
-        unsigned expected = countBindings(pattern);
-        unsigned actual = getArms()[index].getNumArguments();
-        if (expected != actual)
-          return emitOpError("arm ")
-                 << index << " expects " << expected
-                 << " binding(s) but has " << actual
-                 << " block argument(s)";
-      }
-    }
+        
+        // loop through all patterns and check them against the scrutinee type
+        Type scrutineeType = getScrutinee().getType();
+        for (auto [index, patternValue] : llvm::enumerate(*patterns)) {
+            auto pattern = cast<PatternAttr>(patternValue);
+            SmallVector<Type> bindingTypes;
 
-    // a top-level literal pattern must carry the scrutinee's type; literals
-    // nested under constructor patterns become checkable once constructors
-    // carry field types
-    if (patterns) {
-      for (Attribute patternValue : *patterns) {
-        auto pattern = cast<PatternAttr>(patternValue);
-        if (pattern.getKind() != "literal")
-          continue;
-        IntegerAttr payload = pattern.getPayload();
-        if (payload && payload.getType() != getScrutinee().getType())
-          return emitOpError("literal pattern payload type ")
-                 << payload.getType()
-                 << " does not match the scrutinee type "
-                 << getScrutinee().getType();
-      }
+            // recursively check the pattern against the corresponding scrutinee type
+            if (failed(checkPattern(*this, pattern, scrutineeType, bindingTypes)))
+            return failure();
+
+            // check that the number of bindings matches the number of block arguments in the arm
+            Block &armBlock = getArms()[index].front();
+            if (bindingTypes.size() != armBlock.getNumArguments())
+                return emitOpError("arm ")
+                    << index << " expects " << bindingTypes.size()
+                    << " binding(s) but has " << armBlock.getNumArguments()
+                    << " block argument(s)";
+            for (auto [i, arg] : llvm::enumerate(armBlock.getArguments())) {
+                if (arg.getType() != bindingTypes[i])
+                    return emitOpError("arm ")
+                    << index << " binding " << i << " has type "
+                    << arg.getType() << " but its pattern binds a value of type "
+                    << bindingTypes[i];
+            }
+        }
     }
 
     // check default case's yield

@@ -17,3 +17,11 @@ mlir_tablegen(MatchAttrs.h.inc -gen-attrdef-decls)
 mlir_tablegen(MatchAttrs.cpp.inc -gen-attrdef-defs)
 
 add_public_tablegen_target(MatchAttrsIncGen)
+
+# Match types (e.g. !match.option).
+set(LLVM_TARGET_DEFINITIONS MatchTypes.td)
+
+mlir_tablegen(MatchTypes.h.inc -gen-typedef-decls)
+mlir_tablegen(MatchTypes.cpp.inc -gen-typedef-defs)
+
+add_public_tablegen_target(MatchTypesIncGen)
