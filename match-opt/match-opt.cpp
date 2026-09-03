@@ -2,6 +2,7 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/InitAllDialects.h"
+#include "mlir/InitAllPasses.h"
 
 #include "Match/MatchDialect.h"
 #include "Match/Conversion/MatchToSCF/Passes.h"
@@ -11,7 +12,9 @@ int main(int argc, char **argv) {
   mlir::registerAllDialects(registry);
   registry.insert<mlir::match::MatchDialect>();
 
-  // Register the pass pipeline entries exposed by the match transform passes.
+  // Register the upstream pass pipelines (scf-to-cf, LLVM lowering, ...) and
+  // the pass pipeline entries exposed by the match transform passes.
+  mlir::registerAllPasses();
   mlir::registerMatchPasses();
 
   return mlir::asMainReturnCode(

@@ -2,18 +2,19 @@
 #define MATCH_OPS
 
 include "MatchDialect.td"
+include "MatchAttrs.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 
 
 // Body terminator - yields the arm's results when that arm is selected.
-// Defined above Match_MatchOp since it relies on it; the mnemonic is bare
-// ("yield") because Match_Op already prefixes the dialect name.
+// Defined above Match_MatchOp since it relies on it
 def Match_YieldOp : Match_Op<"yield", [
     Terminator,
     HasParent<"MatchOp">,
-    RegionBranchTerminatorOpInterface // Needed as terminator returns to parent match op
+    // Needed as terminator returns to parent match op
+    RegionBranchTerminatorOpInterface
 ]> {
   let arguments = (ins Variadic<AnyType>:$results);
   let assemblyFormat = "attr-dict ($results^ `:` type($results))?";
@@ -23,10 +24,13 @@ def Match_YieldOp : Match_Op<"yield", [
 def Match_MatchOp : Match_Op<"match", [
     RecursiveMemoryEffects,
     RegionBranchOpInterface,
-    SingleBlockImplicitTerminator<"match::YieldOp">, // terminator is always a match.yield op
+    // so that the terminator is always a match.yield op
+    SingleBlockImplicitTerminator<"match::YieldOp">,
 ]> {
     // The match operation takes a scrutinee, and returns the results of the selected arm.
-    let arguments = (ins AnyType:$scrutinee);
+    // Also takes an optional list of patterns, one per arm, which are used to determine which arm is selected.
+    let arguments = (ins AnyType:$scrutinee,
+                         OptionalAttr<Match_PatternList>:$patterns);
     let results = (outs Variadic<AnyType>:$results);
     // region 0 is the default, 1..N is the arms
     let regions = (region AnyRegion:$otherwise,

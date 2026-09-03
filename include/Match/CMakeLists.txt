@@ -9,3 +9,11 @@ mlir_tablegen(MatchOpsDialect.h.inc -gen-dialect-decls -dialect=match)
 mlir_tablegen(MatchOpsDialect.cpp.inc -gen-dialect-defs -dialect=match)
 
 add_public_tablegen_target(MatchOpsIncGen)
+
+# Match attributes (e.g. PatternAttr).
+set(LLVM_TARGET_DEFINITIONS MatchAttrs.td)
+
+mlir_tablegen(MatchAttrs.h.inc -gen-attrdef-decls)
+mlir_tablegen(MatchAttrs.cpp.inc -gen-attrdef-defs)
+
+add_public_tablegen_target(MatchAttrsIncGen)

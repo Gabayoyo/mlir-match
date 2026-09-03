@@ -1,6 +1,7 @@
 add_mlir_dialect_library(MLIRMatch
   MatchDialect.cpp
   MatchOps.cpp
+  MatchAttrs.cpp
   Conversion/MatchToSCF/MatchToSCF.cpp
 
   ADDITIONAL_HEADER_DIRS
@@ -8,6 +9,7 @@ add_mlir_dialect_library(MLIRMatch
 
   DEPENDS
   MatchOpsIncGen
+  MatchAttrsIncGen
   MatchToSCFIncGen
 
   LINK_LIBS PUBLIC

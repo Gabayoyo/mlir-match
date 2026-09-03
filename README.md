@@ -21,6 +21,14 @@ under `programs/`:
 build/bin/match-opt programs/simple.mlir
 ```
 
+The dialect is lowered to structured control flow with the conversion pass, and
+further down to plain branches via the upstream `convert-scf-to-cf`:
+
+```bash
+build/bin/match-opt -convert-match-to-scf programs/simple.mlir
+build/bin/match-opt -convert-match-to-scf -convert-scf-to-cf programs/simple.mlir
+```
+
 ## Testing
 
 `lit` tests live under `test/`:

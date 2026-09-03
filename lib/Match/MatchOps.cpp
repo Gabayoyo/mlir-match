@@ -1,4 +1,5 @@
 #include "Match/MatchOps.h"
+#include "Match/MatchAttrs.h"
 
 namespace mlir {
 namespace match {
@@ -21,9 +22,21 @@ LogicalResult checkYield(MatchOp match, Region &region) {
   return success();
 }
 
+// Number of values a pattern binds: each nested "bind" contributes one.
+unsigned countBindings(PatternAttr pattern) {
+  unsigned count = pattern.getKind() == "bind" ? 1 : 0;
+  for (PatternAttr sub : pattern.getSubpatterns())
+    count += countBindings(sub);
+  return count;
+}
+
 } // namespace
 
 LogicalResult MatchOp::verify() {
+    auto patterns = getPatterns();
+    // An empty pattern list counts as "no patterns", so skip the count check.
+    if (patterns && patterns->size() != 0 && patterns->size() != getArms().size())
+        return emitOpError("the number of patterns must match the number of arms");
 
     // default case should not contain guard
     for (Operation &op : getOtherwise().front()) {
@@ -41,6 +54,20 @@ LogicalResult MatchOp::verify() {
                 hasGuard = true;
             }
         }
+    }
+
+    // each arm's entry block arguments are the values its pattern binds
+    if (patterns) {
+      for (auto [index, patternValue] : llvm::enumerate(*patterns)) {
+        auto pattern = cast<PatternAttr>(patternValue);
+        unsigned expected = countBindings(pattern);
+        unsigned actual = getArms()[index].getNumArguments();
+        if (expected != actual)
+          return emitOpError("arm ")
+                 << index << " expects " << expected
+                 << " binding(s) but has " << actual
+                 << " block argument(s)";
+      }
     }
 
     // check default case's yield
@@ -81,8 +108,15 @@ void MatchOp::getSuccessorRegions(
   return {};
 }
 
-// Syntax: match.match %scrutinee : type -> results { case {..} default {..} }.
-// Cases are printed before the default, but the default is stored as region 0.
+// Syntax:
+//   match.match [attr-dict] %scrutinee : type [-> results]
+//       (case [(%name : type, ...)] { .. })*
+//       default { .. }
+// The optional `(%name : type, ...)` list after a `case` declares the arm's
+// bindings: one typed entry per value the arm's pattern binds, in the order
+// `countBindings` walks. The list becomes the arm region's entry block
+// arguments, so the body can refer to the bound values by name. Cases are
+// printed before the default, but the default is stored as region 0.
 ParseResult MatchOp::parse(OpAsmParser &parser, OperationState &result) {
   if (parser.parseOptionalAttrDict(result.attributes))
     return failure();
@@ -102,8 +136,18 @@ ParseResult MatchOp::parse(OpAsmParser &parser, OperationState &result) {
 
   SmallVector<std::unique_ptr<Region>> cases;
   while (succeeded(parser.parseOptionalKeyword("case"))) {
+    SmallVector<OpAsmParser::Argument> bindings;
+    if (succeeded(parser.parseOptionalLParen())) {
+      if (parser.parseArgumentList(bindings, OpAsmParser::Delimiter::None,
+                                   /*allowType=*/true) ||
+          parser.parseRParen())
+        return failure();
+    }
+
+    // The first block of the region takes the declared bindings as its
+    // arguments, so uses of the names inside the braces resolve to them.
     auto region = std::make_unique<Region>();
-    if (parser.parseRegion(*region))
+    if (parser.parseRegion(*region, bindings))
       return failure();
     cases.push_back(std::move(region));
   }
@@ -120,16 +164,29 @@ ParseResult MatchOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void MatchOp::print(OpAsmPrinter &p) {
-  p << ' ';
+  // printOptionalAttrDict emits a leading space itself when non-empty.
   p.printOptionalAttrDict((*this)->getAttrs());
+  p << ' ';
   p << getScrutinee() << " : " << getScrutinee().getType();
   if (!getResults().empty())
     p << " -> " << getResultTypes();
 
   for (Region &arm : getArms()) {
     p.printNewline();
-    p << "case ";
-    p.printRegion(arm);
+    p << "case";
+    // Print the arm's bindings (its entry block arguments) in the case
+    // header, so the syntax stays `case (%name : type, ...) {` rather than
+    // exposing a raw ^bb0 block header.
+    if (!arm.empty() && !arm.front().getArguments().empty()) {
+      p << " (";
+      llvm::interleaveComma(
+          arm.front().getArguments(), p,
+          [&](BlockArgument arg) { p.printRegionArgument(arg); });
+      p << ')';
+    }
+    p << ' ';
+    // The bindings were printed above, so don't repeat them here.
+    p.printRegion(arm, /*printEntryBlockArgs=*/false);
   }
   p.printNewline();
   p << "default ";

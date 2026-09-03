@@ -13,6 +13,9 @@ def Match_Dialect : Dialect{
         the application of maranget's algorithm onto these language constructs.
     }];
     let cppNamespace = "::mlir::match";
+    // Generate the dialect's attribute parse/print dispatch so #match.pattern
+    // parses via the registered PatternAttr.
+    let useDefaultAttributePrinterParser = 1;
 }
 
 // We specify the BASE class for all standalone operations
