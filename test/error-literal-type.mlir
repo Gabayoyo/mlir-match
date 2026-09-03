@@ -17,4 +17,4 @@ module {
   }
 }
 
-// CHECK: error: 'match.match' op literal pattern payload type 'i64' does not match the scrutinee type 'i32'
+// CHECK: error: 'match.match' op literal pattern payload type 'i64' does not match the expected type 'i32'
