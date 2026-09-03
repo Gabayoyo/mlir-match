@@ -41,6 +41,7 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_BINARY_DIR}/include)
 
 add_subdirectory(include/Match)
+add_subdirectory(include/Match/Conversion/MatchToSCF)
 add_subdirectory(lib/Match)
 add_subdirectory(match-opt)
 add_subdirectory(test)
