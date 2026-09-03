@@ -42,3 +42,4 @@ include_directories(${PROJECT_BINARY_DIR}/include)
 
 add_subdirectory(include/Match)
 add_subdirectory(lib/Match)
+add_subdirectory(match-opt)
