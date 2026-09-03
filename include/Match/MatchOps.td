@@ -16,6 +16,7 @@ def Match_YieldOp : Match_Op<"yield", [
     RegionBranchTerminatorOpInterface // Needed as terminator returns to parent match op
 ]> {
   let arguments = (ins Variadic<AnyType>:$results);
+  let assemblyFormat = "attr-dict ($results^ `:` type($results))?";
 }
 
 // core match operation
@@ -31,6 +32,8 @@ def Match_MatchOp : Match_Op<"match", [
     let regions = (region AnyRegion:$otherwise,
                             VariadicRegion<AnyRegion>:$arms);
     let hasVerifier = 1;
+    // case/default keywords around regions need a hand-written parse/print.
+    let hasCustomAssemblyFormat = 1;
 
     // RegionBranchOpInterface has no default for getSuccessorRegions
     // so we use extraClassDeclaration here to add the getSuccessorRegions method
@@ -51,6 +54,7 @@ def Match_GuardOp : Match_Op<"guard", [
     HasParent<"MatchOp">,
 ]> {
     let arguments = (ins I1:$condition);
+  let assemblyFormat = "attr-dict $condition";
 }
 
 #endif // MATCH_OPS

@@ -81,5 +81,68 @@ void MatchOp::getSuccessorRegions(
   return {};
 }
 
+// Syntax: match.match %scrutinee : type -> results { case {..} default {..} }.
+// Cases are printed before the default, but the default is stored as region 0.
+ParseResult MatchOp::parse(OpAsmParser &parser, OperationState &result) {
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  OpAsmParser::UnresolvedOperand scrutinee;
+  Type scrutineeType;
+  if (parser.parseOperand(scrutinee) || parser.parseColonType(scrutineeType))
+    return failure();
+
+  SmallVector<Type> resultTypes;
+  if (parser.parseOptionalArrowTypeList(resultTypes))
+    return failure();
+  result.addTypes(resultTypes);
+
+  if (parser.resolveOperand(scrutinee, scrutineeType, result.operands))
+    return failure();
+
+  if (parser.parseLBrace())
+    return failure();
+
+  SmallVector<std::unique_ptr<Region>> cases;
+  while (succeeded(parser.parseOptionalKeyword("case"))) {
+    auto region = std::make_unique<Region>();
+    if (parser.parseRegion(*region))
+      return failure();
+    cases.push_back(std::move(region));
+  }
+
+  auto defaultRegion = std::make_unique<Region>();
+  if (parser.parseKeyword("default") || parser.parseRegion(*defaultRegion))
+    return failure();
+
+  if (parser.parseRBrace())
+    return failure();
+
+  // Default goes first so it lands in region 0; cases follow.
+  result.addRegion(std::move(defaultRegion));
+  for (auto &region : cases)
+    result.addRegion(std::move(region));
+  return success();
+}
+
+void MatchOp::print(OpAsmPrinter &p) {
+  p << ' ';
+  p.printOptionalAttrDict((*this)->getAttrs());
+  p << getScrutinee() << " : " << getScrutinee().getType();
+  if (!getResults().empty())
+    p << " -> " << getResultTypes();
+
+  p << " {";
+  p.printNewline();
+  for (Region &arm : getArms()) {
+    p << " case ";
+    p.printRegion(arm);
+  }
+  p << " default ";
+  p.printRegion(getOtherwise());
+  p.printNewline();
+  p << '}';
+}
+
 } // namespace match
 } // namespace mlir

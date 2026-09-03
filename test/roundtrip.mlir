@@ -7,32 +7,30 @@ module {
     %c1 = arith.constant 1 : i32
     %neg1 = arith.constant -1 : i32
 
-    %result = "match.match"(%x) ({
-      // default region
-      ^bb0:
-        "match.yield"(%c0) : (i32) -> ()
-    }, {
-      // arm: x > 0
-      ^bb0:
+    %result = match.match %x : i32 -> i32 {
+      case {
         %is_pos = arith.cmpi sgt, %x, %c0 : i32
-        "match.guard"(%is_pos) : (i1) -> ()
-        "match.yield"(%c1) : (i32) -> ()
-    }, {
-      // arm: x < 0
-      ^bb0:
+        match.guard %is_pos
+        match.yield %c1 : i32
+      }
+      case {
         %is_neg = arith.cmpi slt, %x, %c0 : i32
-        "match.guard"(%is_neg) : (i1) -> ()
-        "match.yield"(%neg1) : (i32) -> ()
-    }) : (i32) -> (i32)
+        match.guard %is_neg
+        match.yield %neg1 : i32
+      }
+      default {
+        match.yield %c0 : i32
+      }
+    }
     return %result : i32
   }
 }
 
 // CHECK: func.func @classify
-// CHECK: "match.match"(%arg0) ({
-// CHECK: "match.yield"(%c0_i32) : (i32) -> ()
-// CHECK: "match.guard"
-// CHECK: "match.yield"(%c1_i32) : (i32) -> ()
-// CHECK: "match.guard"
-// CHECK: "match.yield"(%c-1_i32) : (i32) -> ()
-// CHECK: }) : (i32) -> i32
+// CHECK: match.match %arg0 : i32 -> i32 {
+// CHECK: match.guard
+// CHECK: match.yield
+// CHECK: match.guard
+// CHECK: match.yield
+// CHECK: default {
+// CHECK: match.yield
