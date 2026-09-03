@@ -2,6 +2,7 @@
 #define MATCH_MATCHATTRS_H
 
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinAttributes.h"
 
 // Bring the generated attribute classes (e.g. mlir::match::PatternAttr) into
 // scope. The definitions live in MatchAttrs.cpp.inc.

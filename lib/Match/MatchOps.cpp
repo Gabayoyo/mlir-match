@@ -70,6 +70,23 @@ LogicalResult MatchOp::verify() {
       }
     }
 
+    // a top-level literal pattern must carry the scrutinee's type; literals
+    // nested under constructor patterns become checkable once constructors
+    // carry field types
+    if (patterns) {
+      for (Attribute patternValue : *patterns) {
+        auto pattern = cast<PatternAttr>(patternValue);
+        if (pattern.getKind() != "literal")
+          continue;
+        IntegerAttr payload = pattern.getPayload();
+        if (payload && payload.getType() != getScrutinee().getType())
+          return emitOpError("literal pattern payload type ")
+                 << payload.getType()
+                 << " does not match the scrutinee type "
+                 << getScrutinee().getType();
+      }
+    }
+
     // check default case's yield
     if (failed(checkYield(*this, getOtherwise())))
         return failure();
