@@ -100,9 +100,6 @@ ParseResult MatchOp::parse(OpAsmParser &parser, OperationState &result) {
   if (parser.resolveOperand(scrutinee, scrutineeType, result.operands))
     return failure();
 
-  if (parser.parseLBrace())
-    return failure();
-
   SmallVector<std::unique_ptr<Region>> cases;
   while (succeeded(parser.parseOptionalKeyword("case"))) {
     auto region = std::make_unique<Region>();
@@ -113,9 +110,6 @@ ParseResult MatchOp::parse(OpAsmParser &parser, OperationState &result) {
 
   auto defaultRegion = std::make_unique<Region>();
   if (parser.parseKeyword("default") || parser.parseRegion(*defaultRegion))
-    return failure();
-
-  if (parser.parseRBrace())
     return failure();
 
   // Default goes first so it lands in region 0; cases follow.
@@ -132,16 +126,14 @@ void MatchOp::print(OpAsmPrinter &p) {
   if (!getResults().empty())
     p << " -> " << getResultTypes();
 
-  p << " {";
-  p.printNewline();
   for (Region &arm : getArms()) {
-    p << " case ";
+    p.printNewline();
+    p << "case ";
     p.printRegion(arm);
   }
-  p << " default ";
-  p.printRegion(getOtherwise());
   p.printNewline();
-  p << '}';
+  p << "default ";
+  p.printRegion(getOtherwise());
 }
 
 } // namespace match

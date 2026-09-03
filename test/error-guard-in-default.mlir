@@ -6,12 +6,11 @@ module {
     %c0 = arith.constant 0 : i32
     %true = arith.constant true
 
-    %result = match.match %x : i32 -> i32 {
+    %result = match.match %x : i32 -> i32
       default {
         match.guard %true
         match.yield %c0 : i32
       }
-    }
     return %result : i32
   }
 }

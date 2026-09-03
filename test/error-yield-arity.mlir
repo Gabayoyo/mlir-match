@@ -6,14 +6,13 @@ module {
   func.func @bad_yield(%x: i32) -> i32 {
     %c0 = arith.constant 0 : i32
 
-    %result = match.match %x : i32 -> i32 {
+    %result = match.match %x : i32 -> i32
       case {
         match.yield
       }
       default {
         match.yield %c0 : i32
       }
-    }
     return %result : i32
   }
 }

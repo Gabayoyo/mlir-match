@@ -7,7 +7,7 @@ module {
     %c1 = arith.constant 1 : i32
     %neg1 = arith.constant -1 : i32
 
-    %result = match.match %x : i32 -> i32 {
+    %result = match.match %x : i32 -> i32
       case {
         %is_pos = arith.cmpi sgt, %x, %c0 : i32
         match.guard %is_pos
@@ -21,16 +21,19 @@ module {
       default {
         match.yield %c0 : i32
       }
-    }
     return %result : i32
   }
 }
 
 // CHECK: func.func @classify
-// CHECK: match.match %arg0 : i32 -> i32 {
+// CHECK: match.match %arg0 : i32 -> i32
+// CHECK: case {
 // CHECK: match.guard
 // CHECK: match.yield
+// CHECK: }
+// CHECK: case {
 // CHECK: match.guard
 // CHECK: match.yield
+// CHECK: }
 // CHECK: default {
 // CHECK: match.yield
