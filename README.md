@@ -20,3 +20,11 @@ under `programs/`:
 ```bash
 build/bin/match-opt programs/simple.mlir
 ```
+
+## Testing
+
+`lit` tests live under `test/`:
+
+```bash
+ninja -C build check-mlir-match
+```
