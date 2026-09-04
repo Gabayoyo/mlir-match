@@ -8,11 +8,8 @@
 namespace mlir {
 namespace match {
 
-// Structural kinds describe a single value directly: they take no
-// sub-patterns, and only "literal" needs a payload (the constant it matches).
-// Every other kind is a constructor pattern; constructor names and arities are
-// open-ended here and are validated against the scrutinee's type by the match
-// op once that type is known.
+// Structural kinds are closed: no sub-patterns, and only "literal" carries a
+// payload, which is mandatory for it. Other kinds are constructor patterns.
 LogicalResult PatternAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                   StringRef kind, IntegerAttr payload,
                                   ArrayRef<PatternAttr> subpatterns) {

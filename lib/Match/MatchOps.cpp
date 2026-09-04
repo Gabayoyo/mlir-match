@@ -161,10 +161,10 @@ void MatchOp::getSuccessorRegions(
 //       (case [(%name : type, ...)] { .. })*
 //       default { .. }
 // The optional `(%name : type, ...)` list after a `case` declares the arm's
-// bindings: one typed entry per value the arm's pattern binds, in the order
-// `countBindings` walks. The list becomes the arm region's entry block
-// arguments, so the body can refer to the bound values by name. Cases are
-// printed before the default, but the default is stored as region 0.
+// bindings: one typed entry per value the arm's pattern binds, depth-first.
+// The list becomes the arm region's entry block arguments, so the body can
+// refer to the bound values by name. Cases are printed before the default,
+// but the default is stored as region 0.
 ParseResult MatchOp::parse(OpAsmParser &parser, OperationState &result) {
   if (parser.parseOptionalAttrDict(result.attributes))
     return failure();
@@ -290,9 +290,8 @@ ParseResult DeconstructOp::parse(OpAsmParser &parser, OperationState &result) {
   if (parser.parseOperand(value) || parser.parseComma())
     return failure();
 
-  // The constructor name is parsed as a token (keyword or quoted string)
-  // rather than an attribute, so a following `: type` is not consumed as the
-  // attribute's type suffix.
+  // Parse the constructor as a token so a following `: type` is not consumed
+  // with it as an attribute's type suffix.
   std::string constructorName;
   if (parser.parseKeywordOrString(&constructorName))
     return failure();
