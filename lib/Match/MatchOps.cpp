@@ -1,6 +1,7 @@
 #include "Match/MatchOps.h"
 #include "Match/MatchAttrs.h"
 #include "Match/MatchTypes.h"
+#include <string>
 
 namespace mlir {
 namespace match {
@@ -238,6 +239,86 @@ void MatchOp::print(OpAsmPrinter &p) {
   p.printNewline();
   p << "default ";
   p.printRegion(getOtherwise());
+}
+
+LogicalResult DeconstructOp::verify() {
+    Type OperandType = getValue().getType();
+    StringRef ConstructorName = getConstructor();
+    auto results = getResults();
+
+    auto constructor = lookupConstructor(OperandType, ConstructorName);
+
+    // check if the constructor exists on the value's type
+    if (!constructor) {
+        return emitOpError("constructor '")
+            << ConstructorName << "' does not exist on type " << OperandType;
+    } else {
+        // check if the number of results matches the number of fields
+        // should have N + 1 results, where N is the number of fields in the constructor
+        if (results.size() != constructor->fieldTypes.size() + 1) {
+            return emitOpError("number of results (")
+                << getNumResults() << ") does not match the number of fields ("
+                << constructor->fieldTypes.size() << ") for constructor '"
+                << ConstructorName << "' on type " << OperandType;
+        }
+
+        // first result must be I1
+        if (results[0].getType() != IntegerType::get(getContext(), 1)) {
+            return emitOpError("first result must be of type i1 (matched flag)");
+        }
+
+        // each subsequent result must match the corresponding field type in the constructor
+        for (int i = 0; i < constructor->fieldTypes.size(); ++i) {
+            if (results[i + 1].getType() != constructor->fieldTypes[i]) {
+                return emitOpError("result ")
+                    << (i + 1) << " type (" << results[i + 1].getType()
+                    << ") does not match the expected field type ("
+                    << constructor->fieldTypes[i] << ") for constructor '"
+                    << ConstructorName << "' on type " << OperandType;
+            }
+        }
+    }
+
+    return success();
+}
+
+ParseResult DeconstructOp::parse(OpAsmParser &parser, OperationState &result) {
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  OpAsmParser::UnresolvedOperand value;
+  if (parser.parseOperand(value) || parser.parseComma())
+    return failure();
+
+  // The constructor name is parsed as a token (keyword or quoted string)
+  // rather than an attribute, so a following `: type` is not consumed as the
+  // attribute's type suffix.
+  std::string constructorName;
+  if (parser.parseKeywordOrString(&constructorName))
+    return failure();
+
+  Type valueType;
+  if (parser.parseColonType(valueType))
+    return failure();
+
+  SmallVector<Type> resultTypes;
+  if (parser.parseOptionalArrowTypeList(resultTypes))
+    return failure();
+  result.addTypes(resultTypes);
+
+  if (parser.resolveOperand(value, valueType, result.operands))
+    return failure();
+  result.addAttribute("constructor",
+                      parser.getBuilder().getStringAttr(constructorName));
+  return success();
+}
+
+void DeconstructOp::print(OpAsmPrinter &p) {
+  p.printOptionalAttrDict((*this)->getAttrs(), /*elidedAttrs=*/{"constructor"});
+  p << ' ' << getValue() << ", \"" << getConstructor() << "\" : "
+    << getValue().getType();
+  if (!getResults().empty())
+    p << " -> (" << getResultTypes() << ')';
 }
 
 } // namespace match

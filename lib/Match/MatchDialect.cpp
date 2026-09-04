@@ -12,7 +12,7 @@ namespace mlir {
 namespace match {
 
 void MatchDialect::initialize() {
-  addOperations<MatchOp, YieldOp, GuardOp>();
+  addOperations<MatchOp, YieldOp, GuardOp, DeconstructOp>();
   addAttributes<PatternAttr>();
   addTypes<OptionType, PairType>();
 }

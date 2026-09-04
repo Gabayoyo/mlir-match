@@ -58,7 +58,16 @@ def Match_GuardOp : Match_Op<"guard", [
     HasParent<"MatchOp">,
 ]> {
     let arguments = (ins I1:$condition);
-  let assemblyFormat = "attr-dict $condition";
+    let assemblyFormat = "attr-dict $condition";
+}
+
+def Match_DeconstructOp : Match_Op<"deconstruct", [
+    Pure, // pure means no side effects, can be duplicated or eliminated if unused
+]> {
+    let arguments = (ins AnyType:$value, StrAttr:$constructor);
+    let results = (outs I1:$matched, Variadic<AnyType>:$fields);
+    let hasVerifier = 1;
+    let hasCustomAssemblyFormat = 1;
 }
 
 #endif // MATCH_OPS
