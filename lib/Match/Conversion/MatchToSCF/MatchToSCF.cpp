@@ -1,4 +1,5 @@
 #include "Match/Conversion/MatchToSCF/Passes.h"
+#include "Match/Conversion/LoweringUtils.h"
 #include "Match/MatchOps.h"
 #include "Match/MatchAttrs.h"
 #include "Match/MatchTypes.h"
@@ -54,36 +55,6 @@ Value compilePattern(PatternAttr pattern, Value value,
 
     return cond;
   }
-}
-
-// Move `src`'s body ops into `dst` and terminate `dst` with an scf.yield,
-// rewriting the arm's bindings (`src`'s entry arguments) onto `bindings`.
-static void emitBody(Block &src, Block &dst, OpBuilder &builder,
-                     ArrayRef<Value> bindings = {}) {
-  auto yield = cast<YieldOp>(src.getTerminator());
-
-  // Rewrite the bindings' uses before moving, so moved ops and the yield
-  // keep valid references once the arm block is gone.
-  for (auto [argument, binding] : llvm::zip(src.getArguments(), bindings))
-    argument.replaceAllUsesWith(binding);
-
-  SmallVector<Value> results(yield.getOperands());
-
-  for (Operation &op : llvm::make_early_inc_range(src)) {
-    if (&op == yield)
-      continue;
-    op.moveBefore(&dst, dst.end());
-  }
-
-  builder.setInsertionPointToEnd(&dst);
-  scf::YieldOp::create(builder, yield.getLoc(), ValueRange(results));
-}
-
-// Returns true if the arm region contains a guard op.
-static bool hasGuard(Region &arm) {
-  return llvm::any_of(arm.front(), [](Operation &op) {
-    return isa<GuardOp>(op);
-  });
 }
 
 // The result values of a lowered chain, or nullopt when the chain terminated

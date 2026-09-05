@@ -6,6 +6,7 @@
 
 #include "Match/MatchDialect.h"
 #include "Match/Conversion/MatchToSCF/Passes.h"
+#include "Match/Conversion/MatchToDecisionTree/Passes.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
@@ -16,6 +17,7 @@ int main(int argc, char **argv) {
   // the pass pipeline entries exposed by the match transform passes.
   mlir::registerAllPasses();
   mlir::registerMatchPasses();
+  mlir::registerMatchToDecisionTreePasses();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "match-opt", registry));

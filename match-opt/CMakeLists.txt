@@ -12,6 +12,7 @@ set(LIBS
 )
 
 add_llvm_executable(match-opt match-opt.cpp)
+add_dependencies(match-opt MatchToDecisionTreeIncGen)
 
 llvm_update_compile_flags(match-opt)
 target_link_libraries(match-opt PRIVATE ${LIBS})
