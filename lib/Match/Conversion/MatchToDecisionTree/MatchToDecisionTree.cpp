@@ -7,6 +7,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 
 #include <optional>
 #include <vector>
@@ -17,6 +18,8 @@ namespace {
 
 #define GEN_PASS_DEF_MATCHTODECISIONTREEPASS
 #include "Match/Conversion/MatchToDecisionTree/Passes.h.inc"
+#include <iterator>
+#include <utility>
 
 // A remaining match position: the pattern still to check against the value
 // stored in `slot` (an entry of the emitter's slot array).
@@ -32,16 +35,15 @@ struct Row {
   bool hasGuard = false;
 };
 
-// Tagged node: a self-referential std::variant would need indirection, so
-// recursion goes through std::vector of complete nodes instead.
 struct DecisionNode {
-  enum class Kind { Fail, Leaf, CtorTest, GuardTest, Ineligible } kind;
+  enum class Kind { Fail, Leaf, CtorTest, GuardTest, LiteralTest, Ineligible } kind;
   unsigned armIndex = 0;               // Leaf / GuardTest
   SmallVector<unsigned> bindSlots;     // Leaf / GuardTest
   SmallVector<StringRef> ctors;        // CtorTest
-  unsigned slot = 0;                   // CtorTest: slot being tested
+  unsigned slot = 0;                   // CtorTest + LiteralTest: slot being tested
   SmallVector<unsigned> ctorBases;     // CtorTest: first field slot per ctor
-  std::vector<DecisionNode> children;  // CtorTest (+ implicit fallback last)
+  std::vector<DecisionNode> children;  // CtorTest + LiteralTest (+ implicit fallback last)
+  SmallVector<IntegerAttr> literals;   // LiteralTest
 };
 
 // True when a row has nothing left to test: no columns, or every remaining
@@ -84,14 +86,29 @@ SmallVector<StringRef> headConstructors(ArrayRef<Row> rows) {
   return heads;
 }
 
-// Consume constructor `ctor` from the rows' first column. Constructor rows
-// splice their sub-patterns into fresh slots (one per constructor field);
-// complete rows ride unchanged; other constructors are excluded.
+// The literal payloads heading the non-complete rows' first column, in
+// first-appearance order; irrefutable rows are skipped.
+SmallVector<IntegerAttr> headLiterals(ArrayRef<Row> rows) {
+  SmallVector<IntegerAttr> heads;
+  for (const Row &row : rows) {
+    if (row.cols.empty())
+      continue;
+    Col col = row.cols.front();
+    if (col.pattern && col.pattern.getKind() == "literal") {
+      IntegerAttr literal = col.pattern.getPayload();
+      if (!llvm::is_contained(heads, literal))
+        heads.push_back(literal);
+    }
+  }
+  return heads;
+}
+
+// Consume constructor `ctor` from the rows' first column, splicing its
+// sub-patterns in; complete rows ride, other constructors are excluded.
 SmallVector<Row> specialise(ArrayRef<Row> rows, StringRef ctor,
                             unsigned &nextSlot) {
   SmallVector<Row> specialised;
-  // All rows consuming this constructor deconstruct the same value, so its
-  // fields share one slot per position.
+  // One shared slot per field: every consuming row deconstructs the same value.
   unsigned k = 0;
   for (const Row &row : rows)
     if (!isComplete(row) && !row.cols.empty() &&
@@ -122,12 +139,35 @@ SmallVector<Row> specialise(ArrayRef<Row> rows, StringRef ctor,
   return specialised;
 }
 
+SmallVector<Row> specialiseLiteral(ArrayRef<Row> rows, IntegerAttr payload) {
+  SmallVector<Row> specialised;
+  for (const Row &row : rows) {
+    if (isComplete(row)) {
+      specialised.push_back(row);
+      continue;
+    }
+
+    // if the first column is not a literal, or the literal does not match the payload, skip this row
+    if (!row.cols.front().pattern ||
+        row.cols.front().pattern.getKind() != "literal" ||
+        row.cols.front().pattern.getPayload() != payload)
+      continue;
+
+    Row newRow;
+    newRow.armIndex = row.armIndex;
+    newRow.hasGuard = row.hasGuard;
+    newRow.bound = row.bound;
+    newRow.cols.append(row.cols.begin() + 1, row.cols.end());
+    specialised.push_back(newRow);
+  }
+  return specialised;
+}
+
 DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
   if (rows.empty())
-    return DecisionNode{DecisionNode::Kind::Fail, 0, {}, {}, 0, {}, {}};
+    return DecisionNode{DecisionNode::Kind::Fail, 0, {}, {}, 0, {}, {}, {}};
 
-  // A leading column that is irrefutable in every row needs no test: consume
-  // it (recording any bind) and move on.
+  // An all-irrefutable leading column needs no test; consume it (and binds).
   for (;;) {
     Row &front = rows.front();
     if (isComplete(front))
@@ -159,7 +199,7 @@ DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
       if (!col.pattern || col.pattern.getKind() == "bind" ||
           col.pattern.getKind() == "wildcard")
         return DecisionNode{DecisionNode::Kind::Ineligible, 0, {}, {}, 0, {},
-                            {}};
+                            {}, {}};
     }
 
   Row &first = rows.front();
@@ -172,11 +212,40 @@ DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
       std::vector<DecisionNode> child{
           compileRows(std::move(rest), nextSlot)};
       return DecisionNode{DecisionNode::Kind::GuardTest, first.armIndex,
-                          binds, {}, 0, {}, std::move(child)};
+                          binds, {}, 0, {}, std::move(child), {}};
     }
     // bind or wildcard at the head: the first row always fires
     return DecisionNode{DecisionNode::Kind::Leaf, first.armIndex,
-                        binds, {}, 0, {}, {}};
+                        binds, {}, 0, {}, {}, {}};
+  }
+
+  if (first.cols.front().pattern.getKind() == "literal") {
+    SmallVector<IntegerAttr> heads = headLiterals(rows);
+    std::vector<DecisionNode> children;
+    for (IntegerAttr literal : heads) {
+      DecisionNode child =
+          compileRows(specialiseLiteral(rows, literal), nextSlot);
+      if (child.kind == DecisionNode::Kind::Ineligible)
+        return child;
+      children.push_back(std::move(child));
+    }
+
+    // Irrefutable rows match none of the tested literals; they fire in the
+    // fail branch, and the default runs only when there are none.
+    SmallVector<Row> fallbackRows;
+    for (const Row &row : rows)
+      if (isComplete(row))
+        fallbackRows.push_back(row);
+    {
+      DecisionNode child = compileRows(std::move(fallbackRows), nextSlot);
+      if (child.kind == DecisionNode::Kind::Ineligible)
+        return child;
+      children.push_back(std::move(child));
+    }
+
+    unsigned slot = first.cols.front().slot;
+    return DecisionNode{DecisionNode::Kind::LiteralTest, 0, {}, {}, slot, {},
+                        std::move(children), std::move(heads)};
   }
 
   SmallVector<StringRef> heads = headConstructors(rows);
@@ -191,9 +260,8 @@ DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
     children.push_back(std::move(child));
   }
 
-  // Rows that match none of the tested constructors are exactly the
-  // irrefutable ones; they fire in the fail branch (first match wins), and
-  // the default runs only when there are none.
+  // Irrefutable rows match none of the tested constructors; they fire in the
+  // fail branch, and the default runs only when there are none.
   SmallVector<Row> fallbackRows;
   for (const Row &row : rows)
     if (isComplete(row))
@@ -207,7 +275,7 @@ DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
 
   unsigned slot = first.cols.front().slot;
   return DecisionNode{DecisionNode::Kind::CtorTest, 0, {}, heads, slot,
-                      std::move(bases), std::move(children)};
+                      std::move(bases), std::move(children), {}};
 }
 
 void emitDefault(MatchOp match, Block &dst, OpBuilder &builder) {
@@ -215,23 +283,17 @@ void emitDefault(MatchOp match, Block &dst, OpBuilder &builder) {
   auto yield = cast<YieldOp>(def.getTerminator());
   builder.setInsertionPointToEnd(&dst);
 
-  // Regular clone can't be used here as clones need to refer to their own ops
-  // we use IRMapping to maintain relative mapping
+  // Clone with an IRMapping so clones reference each other's results.
   IRMapping mapping;
   for (Operation &op : llvm::make_early_inc_range(def)) {
     if (&op == yield)
       continue;
-
-    // clone op with mapping in mind, and insert it into the new block
     Operation *clone = op.clone(mapping);
     builder.insert(clone);
-
-    // map the original op's results to the clone's results
     for (auto [orig, repl] : llvm::zip(op.getResults(), clone->getResults()))
       mapping.map(orig, repl);
   }
 
-  // clone the yield op, remapping its operands to the new block's values
   SmallVector<Value> results;
   for (Value operand : yield.getOperands())
     results.push_back(mapping.lookupOrDefault(operand));
@@ -242,6 +304,9 @@ using PathResult = std::optional<SmallVector<Value>>;
 
 PathResult emitCtorTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
                         MatchOp match, OpBuilder &builder, unsigned index);
+
+PathResult emitLiteralTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
+                           MatchOp match, OpBuilder &builder, unsigned index);
 
 PathResult emitNode(const DecisionNode &node, SmallVectorImpl<Value> &slots,
                     MatchOp match, OpBuilder &builder) {
@@ -312,6 +377,12 @@ PathResult emitNode(const DecisionNode &node, SmallVectorImpl<Value> &slots,
     }
     return SmallVector<Value>(scfIf.getResults());
   }
+  case DecisionNode::Kind::LiteralTest: {
+    return emitLiteralTest(node, slots, match, builder, 0);
+  }
+  case DecisionNode::Kind::Ineligible:
+    // Ineligible trees are filtered before emission ever runs.
+    llvm_unreachable("ineligible tree reached the emitter");
   }
   llvm_unreachable("unhandled decision node kind");
 }
@@ -373,15 +444,59 @@ PathResult emitCtorTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
   return SmallVector<Value>(scfIf.getResults());
 }
 
-// True when a pattern is compileable by this pass: no literals, and a bind or
-// wildcard may only sit under a single-field constructor (never as a direct
-// field of a multi-field one, which would misalign the column matrices).
+// Chain of equality tests: `literals[index]` gets an scf.if whose then-branch
+// holds its child node and whose else holds the next test (or the fallback).
+PathResult emitLiteralTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
+                           MatchOp match, OpBuilder &builder, unsigned index) {
+  Value literal = arith::ConstantOp::create(builder, match.getLoc(),
+                                            node.literals[index]);
+  Value equal = arith::CmpIOp::create(builder, match.getLoc(),
+                                      arith::CmpIPredicate::eq,
+                                      slots[node.slot], literal);
+
+  auto scfIf = scf::IfOp::create(
+      builder, match.getLoc(),
+      SmallVector<Type>(match.getResultTypes().begin(),
+                        match.getResultTypes().end()),
+      equal, /*addThenBlock=*/true, /*addElseBlock=*/true);
+
+  // Then-branch: this literal's child node. No new values appear: the tested
+  // slot still holds the value deeper columns (and bind rows) read.
+  Block &thenBlock = scfIf.getThenRegion().front();
+  builder.setInsertionPointToEnd(&thenBlock);
+  PathResult child = emitNode(node.children[index], slots, match, builder);
+  if (child) {
+    builder.setInsertionPointToEnd(&thenBlock);
+    scf::YieldOp::create(builder, match.getLoc(), ValueRange(*child));
+  }
+
+  // Else-branch: the next literal test, or the fallback rows (last child)
+  // when none match.
+  Block &elseBlock = scfIf.getElseRegion().front();
+  builder.setInsertionPointToEnd(&elseBlock);
+  if (index + 1 < node.literals.size()) {
+    PathResult rest = emitLiteralTest(node, slots, match, builder, index + 1);
+    if (rest) {
+      builder.setInsertionPointToEnd(&elseBlock);
+      scf::YieldOp::create(builder, match.getLoc(), ValueRange(*rest));
+    }
+  } else {
+    PathResult fallback = emitNode(node.children.back(), slots, match, builder);
+    if (fallback) {
+      builder.setInsertionPointToEnd(&elseBlock);
+      scf::YieldOp::create(builder, match.getLoc(), ValueRange(*fallback));
+    }
+  }
+
+  return SmallVector<Value>(scfIf.getResults());
+}
+
+// Compileable patterns: literals and binds only under single-field
+// constructors (never a direct field of a multi-field one).
 bool isTreePattern(PatternAttr pattern) {
   StringRef kind = pattern.getKind();
   if (kind == "bind" || kind == "wildcard")
     return true;
-  if (kind == "literal")
-    return false;
   ArrayRef<PatternAttr> subs = pattern.getSubpatterns();
   if (subs.size() > 1) {
     for (PatternAttr sub : subs)
@@ -394,7 +509,7 @@ bool isTreePattern(PatternAttr pattern) {
   return true;
 }
 
-// A match is tree-eligible when it carries one pattern per arm, no literals,
+// A match is tree-eligible when it carries one pattern per arm,
 // and every pattern is compileable under the column restrictions.
 bool isEligible(MatchOp match) {
   auto patterns = match.getPatterns();
