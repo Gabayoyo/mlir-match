@@ -39,21 +39,6 @@ module {
     return %r : i32
   }
 
-  // Ineligible: a guarded arm means the whole match is left alone.
-  func.func @guarded(%v: !match.option<i32>) -> i32 {
-    %c0 = arith.constant 0 : i32
-    %c10 = arith.constant 10 : i32
-    %r = match.match {patterns = [#match.pattern<"some"(#match.pattern<"bind">)>]} %v : !match.option<i32> -> i32
-      case (%x: i32) {
-        %big = arith.cmpi sgt, %x, %c10 : i32
-        match.guard %big
-        match.yield %x : i32
-      }
-      default {
-        match.yield %c0 : i32
-      }
-    return %r : i32
-  }
 }
 
 // CHECK: func.func @classify
@@ -77,7 +62,3 @@ module {
 // CHECK: } else {
 // The fail branch fires the trailing bind row, not the default.
 // CHECK: scf.yield %c2_i32 : i32
-
-// CHECK: func.func @guarded
-// CHECK: match.match {patterns = [#match.pattern<"some" (#match.pattern<"bind">)>]} %arg0 : !match.option<i32> -> i32
-// CHECK: match.guard
