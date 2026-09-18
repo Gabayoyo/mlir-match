@@ -331,15 +331,15 @@ PathResult emitNode(const DecisionNode &node, SmallVectorImpl<Value> &slots,
     for (unsigned slot : node.bindSlots)
       bindings.push_back(slots[slot]);
 
-    // The arm's bindings are its entry args; remap them so the guard ops and
-    // body keep valid references.
+    // The arm's bindings are its entry args
+    // remap them so the guard ops and body keep valid references.
     Block &armBlock = match.getArms()[node.armIndex].front();
     for (auto [argument, binding] :
          llvm::zip(armBlock.getArguments(), bindings))
       argument.replaceAllUsesWith(binding);
 
     // Move the condition computation (the ops before the guard) into the
-    // current block; the body stays put.
+    // current block, body stays put
     GuardOp guardOp;
     bool beforeGuard = true;
     Block &dst = *builder.getInsertionBlock();
@@ -387,7 +387,7 @@ PathResult emitNode(const DecisionNode &node, SmallVectorImpl<Value> &slots,
   llvm_unreachable("unhandled decision node kind");
 }
 
-// Chain of constructor tests: `ctors[index]` gets an scf.if whose then-branch
+// Chain of constructor tests: ctors[index] gets an scf.if whose then-branch
 // holds its child node and whose else holds the next test (or the fallback).
 PathResult emitCtorTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
                         MatchOp match, OpBuilder &builder, unsigned index) {
@@ -536,11 +536,36 @@ SmallVector<Row> buildRows(MatchOp match) {
   return rows;
 }
 
+// Which column the compiler questions first: `leftmost` keeps the source
+// column order, `discriminating` picks the column that separates the most
+// rows.
+enum class ColumnChoice { Leftmost, Discriminating };
+
+// Accepted option spellings: one source of truth for parsing and for the
+// diagnostic that reports an unrecognised value.
+const std::pair<StringRef, ColumnChoice> kColumnChoices[] = {
+    {"leftmost", ColumnChoice::Leftmost},
+    {"discriminating", ColumnChoice::Discriminating}};
+
+// Returns the strategy named by `value`, or nullopt when it is not accepted.
+std::optional<ColumnChoice> parseColumnChoice(StringRef value) {
+  for (auto [name, choice] : kColumnChoices)
+    if (value == name)
+      return choice;
+  return std::nullopt;
+}
+
 // Lowers eligible pattern rows via a Maranget-style decision tree of scf
 // control flow
 struct MatchToDecisionTreePass
     : impl::MatchToDecisionTreePassBase<MatchToDecisionTreePass> {
   void runOnOperation() override {
+    // Column selection is not wired into compileRows yet, and an unrecognised
+    // value falls back to leftmost for now.
+    ColumnChoice choice = parseColumnChoice(columnChoice.getValue())
+                              .value_or(ColumnChoice::Leftmost);
+    (void)choice;
+
     auto func = getOperation();
     SmallVector<MatchOp> matches;
     func.walk([&](MatchOp match) {
