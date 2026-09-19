@@ -118,9 +118,9 @@ module {
     return %r : i32
   }
 
-  // A bind as a direct field of a multi-field constructor cannot align with
-  // the column model; the match stays put for the naive pass.
-  func.func @ineligible(%v: !match.pair<i32, i32>) -> i32 {
+  // A bind as a direct field of a multi-field constructor: the bind column is
+  // consumed without a test, and the literal beside it is tested.
+  func.func @mixed_column(%v: !match.pair<i32, i32>) -> i32 {
     %c0 = arith.constant 0 : i32
     %c1 = arith.constant 1 : i32
     %r = match.match {patterns = [
@@ -218,6 +218,15 @@ module {
 // CHECK: scf.yield %c12_i32 : i32
 // CHECK: return %[[IF0]] : i32
 
-// CHECK-LABEL: func.func @ineligible
-// CHECK: %[[R:.*]] = match.match {patterns = [{{.*}}]} %arg0 : !match.pair<i32, i32> -> i32
-// CHECK: return %[[R]] : i32
+// CHECK-LABEL: func.func @mixed_column
+// CHECK-NOT: match.match
+// CHECK: %[[M:.*]], %[[F:.*]]:2 = match.deconstruct %arg0, "pair" : !match.pair<i32, i32> -> (i1, i32, i32)
+// CHECK: %[[IF0:.*]] = scf.if %[[M]] -> (i32) {
+// The first column holds a bind, so it is consumed without a test.
+// CHECK: %[[C1:.*]] = arith.constant 1 : i32
+// CHECK: %[[EQ:.*]] = arith.cmpi eq, %[[F]]#1, %[[C1]] : i32
+// CHECK: scf.if %[[EQ]] -> (i32) {
+// CHECK: scf.yield %c1_i32 : i32
+// CHECK: } else {
+// CHECK: scf.yield %c0_i32 : i32
+// CHECK: return %[[IF0]] : i32

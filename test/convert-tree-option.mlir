@@ -1,7 +1,7 @@
 // RUN: %matchopt -match-to-decision-tree %s | %FileCheck %s
 
-// The tree pass lowers eligible pattern matches to shared constructor tests;
-// matches with guards are left untouched for the naive conversion.
+// The tree pass shares one constructor test across the rows that ask for it, and
+// a trailing bind row fires in the fail branch.
 module {
   func.func @classify(%v: !match.option<i32>) -> i32 {
     %c0 = arith.constant 0 : i32
