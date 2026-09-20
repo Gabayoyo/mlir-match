@@ -23,34 +23,45 @@ Value compilePattern(PatternAttr pattern, Value value,
   if (pattern.getKind() == "bind") {
     // add the value to the bindings list and return a true i1 value
     bindings.push_back(value);
-    return arith::ConstantOp::create(builder, value.getLoc(), builder.getBoolAttr(true));
+    return arith::ConstantOp::create(builder, value.getLoc(),
+                                     builder.getBoolAttr(true));
   } else if (pattern.getKind() == "wildcard") {
     // return a true i1 value since it matches anything
-    return arith::ConstantOp::create(builder, value.getLoc(), builder.getBoolAttr(true));
+    return arith::ConstantOp::create(builder, value.getLoc(),
+                                     builder.getBoolAttr(true));
   } else if (pattern.getKind() == "literal") {
     // check if the value matches the literal
     IntegerAttr payload = pattern.getPayload();
-    Value literalValue = arith::ConstantOp::create(builder, value.getLoc(), payload);
-    return arith::CmpIOp::create(builder, value.getLoc(), arith::CmpIPredicate::eq, value, literalValue);
+    Value literalValue =
+        arith::ConstantOp::create(builder, value.getLoc(), payload);
+    return arith::CmpIOp::create(builder, value.getLoc(),
+                                 arith::CmpIPredicate::eq, value, literalValue);
   } else {
     // constructor case: c(s1, ... ,sn)
     // emit match.deconstruct(value, "c")
     auto constructor = lookupConstructor(value.getType(), pattern.getKind());
 
     if (!constructor)
-      llvm_unreachable("validated pattern kind is not a constructor of the value's type");
+      llvm_unreachable(
+          "validated pattern kind is not a constructor of the value's type");
 
     // result types are {i1, fieldTypes...}
     SmallVector<Type> resultTypes;
     resultTypes.push_back(builder.getI1Type());
-    resultTypes.append(constructor->fieldTypes.begin(), constructor->fieldTypes.end());
+    resultTypes.append(constructor->fieldTypes.begin(),
+                       constructor->fieldTypes.end());
 
-    auto deconstructOp = match::DeconstructOp::create(builder, value.getLoc(), resultTypes, value, pattern.getKind());
+    auto deconstructOp = match::DeconstructOp::create(
+        builder, value.getLoc(), resultTypes, value, pattern.getKind());
     Value cond = deconstructOp.getResult(0); // the %matched flag
 
     // fold the subpatterns into the condition using and ops
-    for (auto [subpattern, fieldValue] : llvm::zip(pattern.getSubpatterns(), deconstructOp.getResults().drop_front())) {
-      cond = arith::AndIOp::create(builder, value.getLoc(), cond, compilePattern(subpattern, fieldValue, builder, bindings));
+    for (auto [subpattern, fieldValue] :
+         llvm::zip(pattern.getSubpatterns(),
+                   deconstructOp.getResults().drop_front())) {
+      cond = arith::AndIOp::create(
+          builder, value.getLoc(), cond,
+          compilePattern(subpattern, fieldValue, builder, bindings));
     }
 
     return cond;
@@ -205,7 +216,8 @@ struct MatchToSCFPass : impl::MatchToSCFPassBase<MatchToSCFPass> {
           argument.replaceAllUsesWith(binding);
         SmallVector<Value> results(yield.getOperands());
 
-        for (Operation &op : llvm::make_early_inc_range(unconditional.front())) {
+        for (Operation &op :
+             llvm::make_early_inc_range(unconditional.front())) {
           if (&op == yield)
             continue;
           op.moveBefore(&dst, builder.getInsertionPoint());

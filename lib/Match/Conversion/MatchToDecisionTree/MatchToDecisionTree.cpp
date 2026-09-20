@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace mlir {
@@ -18,63 +19,109 @@ namespace {
 
 #define GEN_PASS_DEF_MATCHTODECISIONTREEPASS
 #include "Match/Conversion/MatchToDecisionTree/Passes.h.inc"
-#include <iterator>
-#include <utility>
 
 // A remaining match position: the pattern still to check against the value
-// stored in `slot` (an entry of the emitter's slot array).
+// stored in `slot` (an entry of the emitter's slot array). A null pattern marks
+// the column as consumed: this row does not question the position, but keeps it
+// so its remaining columns stay aligned with the other rows'. `bindBase` counts
+// the binds preceding this pattern in its arm, which is the ordinal a bind here
+// binds in.
 struct Col {
   PatternAttr pattern;
   unsigned slot;
+  unsigned bindBase;
 };
 
 struct Row {
-  SmallVector<Col> cols;      // remaining columns, in order
-  SmallVector<unsigned> bound; // slots of binds consumed without a test
+  SmallVector<Col> cols; // remaining columns, in order
+  // (ordinal, slot) of each bind consumed without a test, in the order consumed
+  SmallVector<std::pair<unsigned, unsigned>> bound;
   unsigned armIndex;
   bool hasGuard = false;
 };
 
 struct DecisionNode {
-  enum class Kind { Fail, Leaf, CtorTest, GuardTest, LiteralTest, Ineligible } kind;
+  enum class Kind {
+    Fail, Leaf, CtorTest, GuardTest, LiteralTest, Ineligible
+  } kind;
   unsigned armIndex = 0;               // Leaf / GuardTest
   SmallVector<unsigned> bindSlots;     // Leaf / GuardTest
   SmallVector<StringRef> ctors;        // CtorTest
-  unsigned slot = 0;                   // CtorTest + LiteralTest: slot being tested
+  unsigned slot = 0;                   // CtorTest + LiteralTest: tested slot
   SmallVector<unsigned> ctorBases;     // CtorTest: first field slot per ctor
-  std::vector<DecisionNode> children;  // CtorTest + LiteralTest (+ implicit fallback last)
+  // CtorTest + LiteralTest; the last child is the fallback branch.
+  std::vector<DecisionNode> children;
   SmallVector<IntegerAttr> literals;   // LiteralTest
 };
 
+// True when a column still asks something: a refutable pattern is needed to
+// test it, while a consumed position or an irrefutable pattern rides.
+bool isRefutable(const Col &col) {
+  return col.pattern && col.pattern.getKind() != "bind" &&
+         col.pattern.getKind() != "wildcard";
+}
+
 // True when a row has nothing left to test: no columns, or every remaining
-// column is irrefutable (bind/wildcard).
+// column irrefutable (bind/wildcard) or consumed.
 bool isComplete(const Row &row) {
-  if (row.cols.empty())
-    return true;
   for (const Col &col : row.cols)
-    if (col.pattern && col.pattern.getKind() != "bind" &&
-        col.pattern.getKind() != "wildcard")
+    if (isRefutable(col))
       return false;
   return true;
 }
 
-// The slots each bind of a complete row captures, in column order.
+// How many binds a pattern holds, in depth-first order.
+unsigned bindCount(PatternAttr pattern) {
+  if (pattern.getKind() == "bind")
+    return 1;
+  unsigned count = 0;
+  for (PatternAttr sub : pattern.getSubpatterns())
+    count += bindCount(sub);
+  return count;
+}
+
+// The slots each bind of a complete row captures, in arm order.
 SmallVector<unsigned> rowBindSlots(const Row &row) {
-  SmallVector<unsigned> slots(row.bound.begin(), row.bound.end());
+  SmallVector<std::pair<unsigned, unsigned>> binds(row.bound.begin(),
+                                                   row.bound.end());
   for (const Col &col : row.cols)
     if (col.pattern && col.pattern.getKind() == "bind")
-      slots.push_back(col.slot);
+      binds.push_back({col.bindBase, col.slot});
+  llvm::sort(binds);
+  SmallVector<unsigned> slots;
+  for (auto [ordinal, slot] : binds)
+    slots.push_back(slot);
   return slots;
 }
 
-// The constructors heading the non-complete rows' first column, in
+// Copy `row` with the questioned column consumed: replaced by `fill` consumed
+// entries, one per field of the tested constructor (none for a literal test),
+// so the row's later columns stay aligned with the specialised rows.
+Row rideRow(const Row &row, unsigned column, unsigned fill) {
+  Row ridden;
+  ridden.armIndex = row.armIndex;
+  ridden.hasGuard = row.hasGuard;
+  ridden.bound = row.bound;
+  Col col = row.cols[column];
+  if (col.pattern && col.pattern.getKind() == "bind")
+    ridden.bound.push_back({col.bindBase, col.slot});
+  ridden.cols.append(row.cols.begin(), row.cols.begin() + column);
+  for (unsigned i = 0; i < fill; ++i)
+    ridden.cols.push_back({PatternAttr(), 0, 0});
+  ridden.cols.append(row.cols.begin() + column + 1, row.cols.end());
+  return ridden;
+}
+
+// The constructors heading the non-complete rows' given column, in
 // first-appearance order; irrefutable rows are skipped.
-SmallVector<StringRef> headConstructors(ArrayRef<Row> rows) {
+SmallVector<StringRef> headConstructors(ArrayRef<Row> rows, unsigned column) {
   SmallVector<StringRef> heads;
   for (const Row &row : rows) {
-    if (row.cols.empty())
+    // Complete rows ride, so they may hold fewer columns than the one asked
+    // about, and their heads are never tested here.
+    if (isComplete(row) || row.cols.size() <= column)
       continue;
-    Col col = row.cols.front();
+    Col col = row.cols[column];
     if (!col.pattern || col.pattern.getKind() == "bind" ||
         col.pattern.getKind() == "wildcard")
       continue; // irrefutable or consumed: rides, never tested here
@@ -86,14 +133,14 @@ SmallVector<StringRef> headConstructors(ArrayRef<Row> rows) {
   return heads;
 }
 
-// The literal payloads heading the non-complete rows' first column, in
+// The literal payloads heading the non-complete rows' given column, in
 // first-appearance order; irrefutable rows are skipped.
-SmallVector<IntegerAttr> headLiterals(ArrayRef<Row> rows) {
+SmallVector<IntegerAttr> headLiterals(ArrayRef<Row> rows, unsigned column) {
   SmallVector<IntegerAttr> heads;
   for (const Row &row : rows) {
-    if (row.cols.empty())
+    if (isComplete(row) || row.cols.size() <= column)
       continue;
-    Col col = row.cols.front();
+    Col col = row.cols[column];
     if (col.pattern && col.pattern.getKind() == "literal") {
       IntegerAttr literal = col.pattern.getPayload();
       if (!llvm::is_contained(heads, literal))
@@ -103,17 +150,19 @@ SmallVector<IntegerAttr> headLiterals(ArrayRef<Row> rows) {
   return heads;
 }
 
-// Consume constructor `ctor` from the rows' first column, splicing its
-// sub-patterns in; complete rows ride, other constructors are excluded.
-SmallVector<Row> specialise(ArrayRef<Row> rows, StringRef ctor,
+// Consume constructor `ctor` from the rows' questioned column, splicing its
+// sub-patterns in. Rows headed by another constructor are excluded, while rows
+// that leave the column unquestioned ride into the branch with it consumed.
+SmallVector<Row> specialise(ArrayRef<Row> rows, StringRef ctor, unsigned column,
                             unsigned &nextSlot) {
   SmallVector<Row> specialised;
   // One shared slot per field: every consuming row deconstructs the same value.
   unsigned k = 0;
   for (const Row &row : rows)
-    if (!isComplete(row) && !row.cols.empty() &&
-        row.cols.front().pattern.getKind() == ctor) {
-      k = row.cols.front().pattern.getSubpatterns().size();
+    if (!isComplete(row) && row.cols.size() > column &&
+        isRefutable(row.cols[column]) &&
+        row.cols[column].pattern.getKind() == ctor) {
+      k = row.cols[column].pattern.getSubpatterns().size();
       break;
     }
   unsigned base = nextSlot;
@@ -124,46 +173,160 @@ SmallVector<Row> specialise(ArrayRef<Row> rows, StringRef ctor,
       specialised.push_back(row);
       continue;
     }
-    if (row.cols.front().pattern.getKind() != ctor)
+    Col col = row.cols[column];
+    if (!isRefutable(col)) {
+      specialised.push_back(rideRow(row, column, k));
       continue;
+    }
+    if (col.pattern.getKind() != ctor)
+      continue; // another constructor's row belongs to that branch
+
     Row newRow;
     newRow.armIndex = row.armIndex;
     newRow.hasGuard = row.hasGuard;
     newRow.bound = row.bound;
-    ArrayRef<PatternAttr> subs = row.cols.front().pattern.getSubpatterns();
-    for (auto [index, sub] : llvm::enumerate(subs))
-      newRow.cols.push_back({sub, base + static_cast<unsigned>(index)});
-    newRow.cols.append(row.cols.begin() + 1, row.cols.end());
+    newRow.cols.append(row.cols.begin(), row.cols.begin() + column);
+    // Field slots are shared, and the bind ordinals continue from the examined
+    // pattern's base.
+    unsigned subBase = col.bindBase;
+    for (auto [index, sub] : llvm::enumerate(col.pattern.getSubpatterns())) {
+      newRow.cols.push_back(
+          {sub, base + static_cast<unsigned>(index), subBase});
+      subBase += bindCount(sub);
+    }
+    newRow.cols.append(row.cols.begin() + column + 1, row.cols.end());
     specialised.push_back(newRow);
   }
   return specialised;
 }
 
-SmallVector<Row> specialiseLiteral(ArrayRef<Row> rows, IntegerAttr payload) {
+// Consume the literal `payload` from the rows' questioned column, dropping it:
+// a literal has no sub-patterns, so neither the rows that match it nor the rows
+// that leave the column unquestioned gain a column.
+SmallVector<Row> specialiseLiteral(ArrayRef<Row> rows, IntegerAttr payload,
+                                   unsigned column) {
   SmallVector<Row> specialised;
   for (const Row &row : rows) {
     if (isComplete(row)) {
       specialised.push_back(row);
       continue;
     }
-
-    // if the first column is not a literal, or the literal does not match the payload, skip this row
-    if (!row.cols.front().pattern ||
-        row.cols.front().pattern.getKind() != "literal" ||
-        row.cols.front().pattern.getPayload() != payload)
+    Col col = row.cols[column];
+    if (!isRefutable(col)) {
+      specialised.push_back(rideRow(row, column, 0));
+      continue;
+    }
+    if (col.pattern.getKind() != "literal" ||
+        col.pattern.getPayload() != payload)
       continue;
 
     Row newRow;
     newRow.armIndex = row.armIndex;
     newRow.hasGuard = row.hasGuard;
     newRow.bound = row.bound;
-    newRow.cols.append(row.cols.begin() + 1, row.cols.end());
+    newRow.cols.append(row.cols.begin(), row.cols.begin() + column);
+    newRow.cols.append(row.cols.begin() + column + 1, row.cols.end());
     specialised.push_back(newRow);
   }
   return specialised;
 }
 
-DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
+// What a test on a column asks: the slot its questioned rows share, and whether
+// the column holds literals rather than constructors.
+struct ColumnTest {
+  unsigned slot = 0;
+  bool literal = false;
+};
+
+// The test the rows would submit to at `column`, or nullopt when the rows that
+// question the column read different slots: one node deconstructs one slot.
+std::optional<ColumnTest> columnTest(ArrayRef<Row> rows, unsigned column) {
+  std::optional<ColumnTest> test;
+  for (const Row &row : rows) {
+    if (isComplete(row) || row.cols.size() <= column ||
+        !isRefutable(row.cols[column]))
+      continue;
+    ColumnTest candidate{row.cols[column].slot,
+                         row.cols[column].pattern.getKind() == "literal"};
+    if (test && test->slot != candidate.slot)
+      return std::nullopt;
+    test = candidate;
+  }
+  return test;
+}
+
+// The column a test should ask about first. Rows that leave a column
+// unquestioned are copied into every branch, so the mixture rule prefers the
+// column that makes the fewest of them ride, then the one that splits the rows
+// into the most groups. Returns 0, the leftmost column, when nothing beats it.
+unsigned chooseColumn(ArrayRef<Row> rows) {
+  unsigned limit = 0;
+  bool anyNonComplete = false;
+  for (const Row &row : rows) {
+    if (isComplete(row))
+      continue;
+
+    // The shortest non-complete row bounds how far the search may look.
+    if (!anyNonComplete || row.cols.size() < limit) {
+      limit = row.cols.size();
+      anyNonComplete = true;
+    }
+  }
+  if (!anyNonComplete)
+    return 0;
+
+  unsigned bestColumn = 0;
+  unsigned bestRidden = 0;
+  unsigned bestScore = 0;
+  bool haveBest = false;
+
+  for (unsigned column = 0; column < limit; ++column) {
+    if (!columnTest(rows, column))
+      continue; // the rows that question this column disagree on its slot
+
+    // Rows that leave the column unquestioned are copied into every branch, so
+    // the mixture rule prefers the column that makes the fewest of them ride,
+    // and then the one that splits the rows into the most groups.
+    unsigned ridden = 0;
+    for (const Row &row : rows)
+      if (!isComplete(row) && row.cols.size() > column &&
+          !isRefutable(row.cols[column]))
+        ++ridden;
+    unsigned score = columnTest(rows, column)->literal
+                         ? headLiterals(rows, column).size()
+                         : headConstructors(rows, column).size();
+
+    bool better = !haveBest || ridden < bestRidden ||
+                  (ridden == bestRidden && score > bestScore);
+    if (better) {
+      haveBest = true;
+      bestColumn = column;
+      bestRidden = ridden;
+      bestScore = score;
+    }
+  }
+  return bestColumn;
+}
+
+// The rows that reach the fail branch of a test on `column`: rows that leave
+// the column unquestioned, with the column consumed, plus the complete rows.
+SmallVector<Row> fallbackRows(ArrayRef<Row> rows, unsigned column) {
+  SmallVector<Row> fallback;
+  for (const Row &row : rows) {
+    if (isComplete(row))
+      fallback.push_back(row);
+    else if (!isRefutable(row.cols[column]))
+      fallback.push_back(rideRow(row, column, 0));
+  }
+  return fallback;
+}
+
+// Which column the compiler questions first: `leftmost` keeps the source
+// column order, `mixture` picks the column that copies the fewest rows.
+enum class ColumnChoice { Leftmost, Mixture };
+
+DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot,
+                         ColumnChoice choice) {
   if (rows.empty())
     return DecisionNode{DecisionNode::Kind::Fail, 0, {}, {}, 0, {}, {}, {}};
 
@@ -173,12 +336,10 @@ DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
     if (isComplete(front))
       break;
     bool allIrrefutable = true;
-    for (Row &row : rows) {
+    for (const Row &row : rows) {
       if (isComplete(row))
         continue;
-      Col col = row.cols.front();
-      if (!col.pattern || (col.pattern.getKind() != "bind" &&
-                           col.pattern.getKind() != "wildcard"))
+      if (isRefutable(row.cols.front()))
         allIrrefutable = false;
     }
     if (!allIrrefutable)
@@ -188,19 +349,10 @@ DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
         continue;
       Col col = row.cols.front();
       if (col.pattern && col.pattern.getKind() == "bind")
-        row.bound.push_back(col.slot);
+        row.bound.push_back({col.bindBase, col.slot});
       row.cols.erase(row.cols.begin());
     }
   }
-
-  for (const Row &row : rows)
-    if (!isComplete(row) && !row.cols.empty()) {
-      Col col = row.cols.front();
-      if (!col.pattern || col.pattern.getKind() == "bind" ||
-          col.pattern.getKind() == "wildcard")
-        return DecisionNode{DecisionNode::Kind::Ineligible, 0, {}, {}, 0, {},
-                            {}, {}};
-    }
 
   Row &first = rows.front();
   if (isComplete(first)) {
@@ -210,7 +362,7 @@ DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
     if (first.hasGuard) {
       SmallVector<Row> rest(rows.begin() + 1, rows.end());
       std::vector<DecisionNode> child{
-          compileRows(std::move(rest), nextSlot)};
+          compileRows(std::move(rest), nextSlot, choice)};
       return DecisionNode{DecisionNode::Kind::GuardTest, first.armIndex,
                           binds, {}, 0, {}, std::move(child), {}};
     }
@@ -219,62 +371,68 @@ DecisionNode compileRows(SmallVector<Row> rows, unsigned &nextSlot) {
                         binds, {}, 0, {}, {}, {}};
   }
 
-  if (first.cols.front().pattern.getKind() == "literal") {
-    SmallVector<IntegerAttr> heads = headLiterals(rows);
+  // Leftmost column by default; otherwise the mixture rule picks the column
+  // that forces the fewest rows to be copied.
+  unsigned column = 0;
+  if (choice == ColumnChoice::Mixture)
+    column = chooseColumn(rows);
+
+  // One node deconstructs one slot, so every row it questions must read that
+  // slot; rows that leave the column unquestioned ride and do not constrain it.
+  std::optional<ColumnTest> test = columnTest(rows, column);
+  if (!test)
+    return DecisionNode{DecisionNode::Kind::Ineligible, 0, {}, {}, 0, {}, {},
+                        {}};
+
+  if (test->literal) {
+    SmallVector<IntegerAttr> heads = headLiterals(rows, column);
     std::vector<DecisionNode> children;
     for (IntegerAttr literal : heads) {
       DecisionNode child =
-          compileRows(specialiseLiteral(rows, literal), nextSlot);
+          compileRows(specialiseLiteral(rows, literal, column), nextSlot,
+                      choice);
       if (child.kind == DecisionNode::Kind::Ineligible)
         return child;
       children.push_back(std::move(child));
     }
 
-    // Irrefutable rows match none of the tested literals; they fire in the
-    // fail branch, and the default runs only when there are none.
-    SmallVector<Row> fallbackRows;
-    for (const Row &row : rows)
-      if (isComplete(row))
-        fallbackRows.push_back(row);
+    // Rows that leave the column unquestioned, and complete rows, reach the
+    // fail branch: the default region runs only when there are none.
     {
-      DecisionNode child = compileRows(std::move(fallbackRows), nextSlot);
+      DecisionNode child =
+          compileRows(fallbackRows(rows, column), nextSlot, choice);
       if (child.kind == DecisionNode::Kind::Ineligible)
         return child;
       children.push_back(std::move(child));
     }
 
-    unsigned slot = first.cols.front().slot;
-    return DecisionNode{DecisionNode::Kind::LiteralTest, 0, {}, {}, slot, {},
-                        std::move(children), std::move(heads)};
+    return DecisionNode{DecisionNode::Kind::LiteralTest, 0, {}, {}, test->slot,
+                        {}, std::move(children), std::move(heads)};
   }
 
-  SmallVector<StringRef> heads = headConstructors(rows);
+  SmallVector<StringRef> heads = headConstructors(rows, column);
   SmallVector<unsigned> bases;
   std::vector<DecisionNode> children;
   for (StringRef ctor : heads) {
     bases.push_back(nextSlot);
     DecisionNode child =
-        compileRows(specialise(rows, ctor, nextSlot), nextSlot);
+        compileRows(specialise(rows, ctor, column, nextSlot), nextSlot, choice);
     if (child.kind == DecisionNode::Kind::Ineligible)
       return child;
     children.push_back(std::move(child));
   }
 
-  // Irrefutable rows match none of the tested constructors; they fire in the
-  // fail branch, and the default runs only when there are none.
-  SmallVector<Row> fallbackRows;
-  for (const Row &row : rows)
-    if (isComplete(row))
-      fallbackRows.push_back(row);
+  // Rows that leave the column unquestioned, and complete rows, reach the fail
+  // branch: the default region runs only when there are none.
   {
-    DecisionNode child = compileRows(std::move(fallbackRows), nextSlot);
+    DecisionNode child =
+        compileRows(fallbackRows(rows, column), nextSlot, choice);
     if (child.kind == DecisionNode::Kind::Ineligible)
       return child;
     children.push_back(std::move(child));
   }
 
-  unsigned slot = first.cols.front().slot;
-  return DecisionNode{DecisionNode::Kind::CtorTest, 0, {}, heads, slot,
+  return DecisionNode{DecisionNode::Kind::CtorTest, 0, {}, heads, test->slot,
                       std::move(bases), std::move(children), {}};
 }
 
@@ -305,8 +463,9 @@ using PathResult = std::optional<SmallVector<Value>>;
 PathResult emitCtorTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
                         MatchOp match, OpBuilder &builder, unsigned index);
 
-PathResult emitLiteralTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
-                           MatchOp match, OpBuilder &builder, unsigned index);
+PathResult emitLiteralTest(const DecisionNode &node,
+                           SmallVectorImpl<Value> &slots, MatchOp match,
+                           OpBuilder &builder, unsigned index);
 
 PathResult emitNode(const DecisionNode &node, SmallVectorImpl<Value> &slots,
                     MatchOp match, OpBuilder &builder) {
@@ -331,30 +490,33 @@ PathResult emitNode(const DecisionNode &node, SmallVectorImpl<Value> &slots,
     for (unsigned slot : node.bindSlots)
       bindings.push_back(slots[slot]);
 
-    // The arm's bindings are its entry args
-    // remap them so the guard ops and body keep valid references.
+    // The arm's bindings are its entry args. The condition computation is
+    // re-emitted here, so the arm stays intact for the branches that emit the
+    // same row again.
     Block &armBlock = match.getArms()[node.armIndex].front();
+    IRMapping mapping;
     for (auto [argument, binding] :
          llvm::zip(armBlock.getArguments(), bindings))
-      argument.replaceAllUsesWith(binding);
+      mapping.map(argument, binding);
 
-    // Move the condition computation (the ops before the guard) into the
-    // current block, body stays put
     GuardOp guardOp;
     bool beforeGuard = true;
-    Block &dst = *builder.getInsertionBlock();
-    for (Operation &op : llvm::make_early_inc_range(armBlock)) {
+    for (Operation &op : armBlock) {
       if (auto guard = dyn_cast<GuardOp>(op)) {
         guardOp = guard;
         beforeGuard = false;
         continue;
       }
-      if (beforeGuard)
-        op.moveBefore(&dst, builder.getInsertionPoint());
+      if (!beforeGuard)
+        continue;
+      Operation *clone = op.clone(mapping);
+      builder.insert(clone);
+      builder.setInsertionPointAfter(clone);
+      for (auto [orig, repl] : llvm::zip(op.getResults(), clone->getResults()))
+        mapping.map(orig, repl);
     }
     assert(guardOp && "guard-test arm must contain a guard");
-    Value condition = guardOp.getCondition();
-    guardOp->erase();
+    Value condition = mapping.lookupOrDefault(guardOp.getCondition());
 
     auto scfIf = scf::IfOp::create(
         builder, match.getLoc(),
@@ -446,8 +608,9 @@ PathResult emitCtorTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
 
 // Chain of equality tests: `literals[index]` gets an scf.if whose then-branch
 // holds its child node and whose else holds the next test (or the fallback).
-PathResult emitLiteralTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
-                           MatchOp match, OpBuilder &builder, unsigned index) {
+PathResult emitLiteralTest(const DecisionNode &node,
+                           SmallVectorImpl<Value> &slots, MatchOp match,
+                           OpBuilder &builder, unsigned index) {
   Value literal = arith::ConstantOp::create(builder, match.getLoc(),
                                             node.literals[index]);
   Value equal = arith::CmpIOp::create(builder, match.getLoc(),
@@ -491,35 +654,13 @@ PathResult emitLiteralTest(const DecisionNode &node, SmallVectorImpl<Value> &slo
   return SmallVector<Value>(scfIf.getResults());
 }
 
-// Compileable patterns: literals and binds only under single-field
-// constructors (never a direct field of a multi-field one).
-bool isTreePattern(PatternAttr pattern) {
-  StringRef kind = pattern.getKind();
-  if (kind == "bind" || kind == "wildcard")
-    return true;
-  ArrayRef<PatternAttr> subs = pattern.getSubpatterns();
-  if (subs.size() > 1) {
-    for (PatternAttr sub : subs)
-      if (sub.getKind() == "bind" || sub.getKind() == "wildcard")
-        return false;
-  }
-  for (PatternAttr sub : subs)
-    if (!isTreePattern(sub))
-      return false;
-  return true;
-}
-
-// A match is tree-eligible when it carries one pattern per arm,
-// and every pattern is compileable under the column restrictions.
+// A match is tree-eligible when it carries one pattern per arm. Every pattern
+// the verifier accepts compiles: rows that leave a column unquestioned are
+// copied into every branch rather than restricting the shape of a pattern.
 bool isEligible(MatchOp match) {
   auto patterns = match.getPatterns();
-  if (!patterns || patterns->empty() ||
-      patterns->size() != match.getArms().size())
-    return false;
-  for (Attribute pattern : *patterns)
-    if (!isTreePattern(cast<PatternAttr>(pattern)))
-      return false;
-  return true;
+  return patterns && !patterns->empty() &&
+         patterns->size() == match.getArms().size();
 }
 
 // One row per arm: a single column matching the scrutinee (slot 0).
@@ -528,7 +669,7 @@ SmallVector<Row> buildRows(MatchOp match) {
   for (auto [index, attribute] : llvm::enumerate(*match.getPatterns())) {
     PatternAttr pattern = cast<PatternAttr>(attribute);
     Row row;
-    row.cols.push_back({pattern, 0});
+    row.cols.push_back({pattern, 0, 0});
     row.armIndex = static_cast<unsigned>(index);
     row.hasGuard = hasGuard(match.getArms()[index]);
     rows.push_back(row);
@@ -536,16 +677,11 @@ SmallVector<Row> buildRows(MatchOp match) {
   return rows;
 }
 
-// Which column the compiler questions first: `leftmost` keeps the source
-// column order, `discriminating` picks the column that separates the most
-// rows.
-enum class ColumnChoice { Leftmost, Discriminating };
-
 // Accepted option spellings: one source of truth for parsing and for the
 // diagnostic that reports an unrecognised value.
 const std::pair<StringRef, ColumnChoice> kColumnChoices[] = {
     {"leftmost", ColumnChoice::Leftmost},
-    {"discriminating", ColumnChoice::Discriminating}};
+    {"mixture", ColumnChoice::Mixture}};
 
 // Returns the strategy named by `value`, or nullopt when it is not accepted.
 std::optional<ColumnChoice> parseColumnChoice(StringRef value) {
@@ -560,13 +696,26 @@ std::optional<ColumnChoice> parseColumnChoice(StringRef value) {
 struct MatchToDecisionTreePass
     : impl::MatchToDecisionTreePassBase<MatchToDecisionTreePass> {
   void runOnOperation() override {
-    // Column selection is not wired into compileRows yet, and an unrecognised
-    // value falls back to leftmost for now.
-    ColumnChoice choice = parseColumnChoice(columnChoice.getValue())
-                              .value_or(ColumnChoice::Leftmost);
-    (void)choice;
-
     auto func = getOperation();
+
+    // An unrecognised value must not fall back to leftmost: a typo would make
+    // the column-choice comparison meaningless.
+    std::optional<ColumnChoice> parsedChoice =
+        parseColumnChoice(columnChoice.getValue());
+    if (!parsedChoice) {
+      InFlightDiagnostic diag = func.emitError()
+                                << "Invalid column-choice option: '"
+                                << columnChoice.getValue() << "'; expected ";
+      llvm::interleaveComma(
+          kColumnChoices, diag,
+          [&](const std::pair<StringRef, ColumnChoice> &entry) {
+            diag << "'" << entry.first << "'";
+          });
+      return signalPassFailure();
+    }
+
+    ColumnChoice choice = *parsedChoice;
+
     SmallVector<MatchOp> matches;
     func.walk([&](MatchOp match) {
       if (isEligible(match))
@@ -575,10 +724,10 @@ struct MatchToDecisionTreePass
 
     for (MatchOp match : matches) {
       unsigned nextSlot = 1; // slot 0 is the scrutinee
-      DecisionNode tree = compileRows(buildRows(match), nextSlot);
+      DecisionNode tree = compileRows(buildRows(match), nextSlot, choice);
 
       if (tree.kind == DecisionNode::Kind::Ineligible)
-        continue; // cannot align columns: leave for the naive pass
+        continue; // rows disagree on a column's value: leave for the naive pass
 
       // A tree rooted in a leaf means the first arm matches unconditionally;
       // inline it in place of the match.

@@ -7,10 +7,12 @@
 #include "Match/MatchDialect.h"
 #include "Match/Conversion/MatchToSCF/Passes.h"
 #include "Match/Conversion/MatchToDecisionTree/Passes.h"
+#include "Match/Conversion/MatchToLLVM/Passes.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
+  mlir::registerAllExtensions(registry);
   registry.insert<mlir::match::MatchDialect>();
 
   // Register the upstream pass pipelines (scf-to-cf, LLVM lowering, ...) and
@@ -18,6 +20,7 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::registerMatchPasses();
   mlir::registerMatchToDecisionTreePasses();
+  mlir::registerMatchToLLVMPasses();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "match-opt", registry));
