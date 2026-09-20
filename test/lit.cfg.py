@@ -22,3 +22,6 @@ wheel_bin = os.path.join(
 config.substitutions.append(("%matchopt", os.path.join(match_bin, "match-opt")))
 config.substitutions.append(("%FileCheck", os.path.join(wheel_bin, "FileCheck")))
 config.substitutions.append(("%not", os.path.join(wheel_bin, "not")))
+config.substitutions.append(
+    ("%mlirtranslate", os.path.join(wheel_bin, "mlir-translate"))
+)
