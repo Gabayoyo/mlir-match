@@ -112,41 +112,62 @@ The table is the single source of truth shared by the verifier (which derives ea
 
 ## Lowering
 
-Two conversion passes lower `match.match` to `scf` control flow; both stop at the semantic layer (`scf.if` plus `match.deconstruct`), leaving representation and codegen choices to downstream work.
+Three conversion passes. The first two lower `match.match` to `scf` control flow (`scf.if` plus `match.deconstruct`); the third gives the tagged types a representation.
 
-**`-convert-match-to-scf`** — the naive fallback: arms are tested top to bottom, each arm's pattern compiled to a flat boolean condition, one `scf.if` per arm, the default in the last else.
+**`-convert-match-to-scf`** — the naive fallback: one `scf.if` per arm, each arm's pattern compiled to a flat boolean condition, the default in the last else.
 
-**`-match-to-decision-tree`** — the Maranget-style pass: compiles pattern rows into a decision tree of shared constructor and literal tests. A pair scrutinee opens into two independently questioned columns; a row whose pattern leaves a column unquestioned (a bind or a wildcard there) is copied into every branch of that column's test with the column consumed, forming the default matrix; guarded arms become guard tests that fall through to the remaining rows when the guard fails; rows that can never fire are pruned; bindings are materialised from the slot that holds the matched value, in the order the arm declares them.
+**`-match-to-decision-tree`** — the Maranget-style pass, compiling pattern rows into a decision tree that shares tests:
 
-Which column a test asks about first is a choice. `-match-to-decision-tree=column-choice=leftmost` follows the source column order — the pass default — while `column-choice=mixture` applies the mixture rule, questioning the column that forces the fewest rows to be copied before falling back on the one that splits the rows into the most groups.
+- `column-choice=leftmost` (the default) questions columns of the decision matrix in source order
+- `column-choice=mixture` (main novelty) prefers the column that copies the fewest rows and then the one that splits them into the most groups.
 
-> [!NOTE]
-> Every pattern the verifier accepts compiles, including the mixed columns where one row binds a field that another row tests. A match whose rows disagree about which value a column holds is left untouched for the naive pass rather than compiled wrongly.
+**`-match-to-llvm`** — gives the tagged types an LLVM representation and lowers `match.deconstruct` to LLVM ops. Done last to fully eliminate any match dialect ops (post-optimisation).
+
+## Findings
+
+Now that we have a means to reduce the average number of tests per pattern matching construct, we can verify that the runtime of the program decreases accordingly (except in cases of high duplication) when applying maranget's algorithm.
+
+| program shape | tests per value | naive | tree | speedup |
+| --- | --- | --- | --- | --- |
+| literal rows under one constructor | 10 → 6 | 106 ms | 95 ms | 1.1x |
+| sixteen such rows | 34 → 18 | 134 ms | 95 ms | 1.4x |
+| nested constructors | 28 → 12 | 121 ms | 73 ms | 1.7x |
+| full matrix over a pair of options | 30 → 16 | 148 ms | 78 ms | 1.9x |
+| a wider version of that matrix | 56 → 25 | 155 ms | 177 ms | 0.9x |
+
+Measured with `tools/bench/` over 50M values per run, best of five, at `-O1`. The last row is the case where duplicated arm bodies cost more than the saved checks.
 
 ## Repository layout
 
 ```
 include/Match/            dialect definitions (TableGen) and headers
 lib/Match/                op/type/attr implementations
-lib/Match/Conversion/     lowering passes (MatchToSCF, MatchToDecisionTree)
+lib/Match/Conversion/     lowering passes (MatchToSCF, MatchToDecisionTree, MatchToLLVM)
 match-opt/                the mlir-opt-style driver for the dialect
-test/                     lit tests (verifier errors, round-trips, both lowerings)
+test/                     lit tests (verifier errors, round-trips, all three lowerings)
 programs/                 example programs with expected outputs
+tools/                    harnesses: run programs, compare and benchmark lowerings
 ```
 
-## Running and testing
+## Running
 
-`match-opt` is a standalone `mlir-opt`-style driver for the dialect. Without a pass it round-trips the input; the conversion passes lower it:
+`match-opt` is a standalone `mlir-opt`-style driver for the dialect:
 
 ```bash
-build/bin/match-opt programs/simple.mlir
-build/bin/match-opt -convert-match-to-scf programs/literal-payload.mlir
-build/bin/match-opt -match-to-decision-tree programs/literal-payload.mlir
+# one branch per arm
+build/bin/match-opt -convert-match-to-scf -match-to-llvm programs/literal-payload.mlir
+
+# apply maranget's algorithm onto the pattern matching construct
+build/bin/match-opt -match-to-decision-tree -convert-match-to-scf -match-to-llvm \
+  programs/literal-payload.mlir
 ```
+Adding the `-match-to-llvm` pass after the transform passes ensures that the match dialect is fully eliminated from the IR, returning pure LLVM IR.
 
-The upstream `convert-scf-to-cf` pass lowers the result further to plain branches.
+## Testing
 
-The lit suite lives under `test/` and covers verifier diagnostics, assembly round-trips, the naive conversion, and the decision-tree pass:
+`tools/run-program.sh` runs a program, and `tools/bench/` measures the two lowerings against each other. Both sit outside the build and the lit suite, since timings are not reproducible in CI.
+
+The lit suite lives under `test/` and covers verifier diagnostics, assembly round-trips, and all three lowerings:
 
 ```bash
 ninja -C build check-mlir-match
@@ -154,11 +175,17 @@ ninja -C build check-mlir-match
 
 ## Status and scope
 
-Implemented: decision-tree lowering for options, nested options, pairs (two columns), guards, literal payloads, mixed columns (rows that leave a column unquestioned are copied into every branch of its test, forming the default matrix), bindings materialised from slots in arm order, fallback rows, dead-row pruning, and the leftmost and mixture rules for choosing the column a test asks about; verified behaviour in the lit suite.
+The dialect, its verifier and its three lowerings are implemented and covered by the lit suite: `match.match` compiles to `scf`, and a program can be lowered out of the dialect entirely, down to LLVM IR.
 
-Planned: adding the decision-tree outputs of the demo programs, and the integration wrap-up of the two passes.
+Extensions that fit the current design:
 
-Out of scope: running the lowered code (no ABI or LLVM codegen for the tagged types, and no runner — the lowering intentionally stops at `scf` plus `match.deconstruct`); user-declared data types; jump-summary sharing, so a tree that copies rows duplicates code instead of jumping to the next matrix; or-patterns, multi-scrutinee matches, and exhaustiveness diagnostics.
+- **A front end.** Nothing parses a source language into `match.match`; the op is written by hand or produced by whatever lowers into it.
+- **Producer ops** — `match.some`, `match.none`, `match.pair` — so match values can be built rather than only deconstructed.
+- **User-defined types.** Declare constructors in IR instead of the built-in `option` and `pair`, and read the constructor table from those declarations.
+- **Or-patterns and multi-scrutinee matches.**
+- **A switch-based lowering.** A column with three or more constructors currently becomes a chain of comparisons; a tag switch would test it once.
+- **Exhaustiveness and reachability diagnostics** at the points the passes already compute the relevant sets.
+- **Jump-summary sharing.** A tree that copies a row duplicates its arm code rather than jumping to the next matrix.
 
 ## Further reading
 
