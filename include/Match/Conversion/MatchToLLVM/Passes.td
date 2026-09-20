@@ -3,10 +3,10 @@
 
 include "mlir/Pass/PassBase.td"
 
-def MatchToLLVMPass : Pass<"match-to-llvm", "func::FuncOp"> {
+def MatchToLLVMPass : Pass<"match-to-llvm", "ModuleOp"> {
   let summary = "Converts deconstruct, pair and option constructs to the LLVM dialect.";
   let constructor = "mlir::match::createMatchToLLVMPass()";
-  let dependentDialects = ["llvm::LLVMDialect"];
+  let dependentDialects = ["LLVM::LLVMDialect", "arith::ArithDialect"];
 }
 
 #endif // MATCH_CONVERSION_MATCHTOLLVM_PASSES_TD

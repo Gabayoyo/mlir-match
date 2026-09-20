@@ -6,18 +6,12 @@
 
 namespace mlir {
 
-// forward declarations, used in in-tree dialects too, cheaper than including headers
-class ConversionTarget;
-class LLVMTypeConverter;
-class RewritePatternSet;
-class Pass;
-
 namespace match {
 
 #define GEN_PASS_DECL
 #include "Match/Conversion/MatchToLLVM/Passes.h.inc"
 
-std::unique_ptr<Pass> createMatchToLLVMPass();                                
+std::unique_ptr<Pass> createMatchToLLVMPass();
 
 } // namespace match
 

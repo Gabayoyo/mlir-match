@@ -3,6 +3,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
+#include "mlir/InitAllExtensions.h"
 
 #include "Match/MatchDialect.h"
 #include "Match/Conversion/MatchToSCF/Passes.h"
