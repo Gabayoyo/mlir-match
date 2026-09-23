@@ -6,10 +6,11 @@
 // RUN: %not %matchopt -match-to-decision-tree=column-choice=bogus %s 2>&1 | %FileCheck %s --check-prefix=ERR
 
 // The default spelling and `leftmost` are the same pass configuration; an
-// unrecognised spelling fails the pass. `leftmost` questions a row's columns in
-// source order, while `mixture` questions the column that copies the fewest
-// rows first, falling back on the one that splits the rows into the most
-// groups, so the two differ on a matrix whose leading column is uniform.
+// unrecognised spelling is rejected by the driver before the pass runs.
+// `leftmost` questions a row's columns in source order, while `mixture`
+// questions the column that copies the fewest rows first, falling back on the
+// one that splits the rows into the most groups, so the two differ on a matrix
+// whose leading column is uniform.
 module {
   // A single column: both strategies can only question it, so they agree.
   func.func @classify(%v: !match.option<i32>) -> i32 {
@@ -86,4 +87,4 @@ module {
 // MIX: %[[HS:.*]] = match.deconstruct %[[HF]]#1, "none" : !match.option<i32> -> (i1)
 // MIX: scf.if %[[HS]] -> (i32) {
 
-// ERR: error: Invalid column-choice option: 'bogus'; expected 'leftmost', 'mixture'
+// ERR: Cannot find option named 'bogus'
