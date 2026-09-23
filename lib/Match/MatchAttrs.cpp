@@ -4,6 +4,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/DialectImplementation.h"
+#include <utility>
 
 namespace mlir {
 namespace match {
@@ -15,12 +16,9 @@ static constexpr StringLiteral kLiteralKind = "literal";
 
 PatternKind getPatternKind(PatternAttr pattern) {
   StringRef kind = pattern.getKind();
-  if (kind == kBindKind)
-    return PatternKind::Bind;
-  if (kind == kWildcardKind)
-    return PatternKind::Wildcard;
-  if (kind == kLiteralKind)
-    return PatternKind::Literal;
+  if (kind == kBindKind)  return PatternKind::Bind;
+  if (kind == kWildcardKind) return PatternKind::Wildcard;
+  if (kind == kLiteralKind) return PatternKind::Literal;
   return PatternKind::Constructor;
 }
 
