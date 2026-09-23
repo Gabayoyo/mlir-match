@@ -72,3 +72,5 @@ Testing/
 .venv/
 .uv-cache/
 .uv-python/
+
+.DS_Store

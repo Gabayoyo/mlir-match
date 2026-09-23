@@ -1,9 +1,8 @@
 import lit.formats
 import os
 
-# Self-contained lit config: tool paths are derived from the repository layout
-# (build/bin for match-opt, the mlir-wheel bin for FileCheck/not) so no cmake
-# site-config plumbing is required.
+# Tool paths come from the repository layout (build/bin for match-opt, the
+# mlir-wheel bin for FileCheck, not and mlir-translate), so no cmake plumbing.
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 config.name = "match-dialect"
