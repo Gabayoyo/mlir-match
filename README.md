@@ -6,11 +6,11 @@ An out-of-tree [MLIR](https://mlir.llvm.org/) dialect for representing functiona
 
 ## Example
 
-Below is an example of matching an `option` value. with cases: `some(1)`, `some(x)`, and `none`. The `match.match` op holds an attribute dictating what each arm's corresponding pattern is. Each arm can also specify a binding which is part of the condition to branch and is present in the body too:
+Below is an example of matching an `option` value, with cases `some(1)`, `some(x)`, and `none`. The `match.match` op holds an attribute dictating what each arm's corresponding pattern is. Each arm can also specify a binding which is part of the condition to branch and is present in the body too:
 
 ```mlir
 // high-level representation (scala-inspired)
-// 
+//
 // r match
 //   case Some(1) => 10
 //   case Some(x) => x * 2    // binding of x to arm body
@@ -60,7 +60,7 @@ The naive lowering gives each arm its own branch, re-asking "is this a `some`?" 
 Prerequisites:
 
 - Python 3.12 with a virtual environment; `requirements.txt` installs the pinned `mlir-wheel` (the MLIR development package this project builds against), `cmake`, `ninja`, and `lit`.
-- No system MLIR or LLVM build is needed.
+- No system MLIR or LLVM build is needed for the pass; running a program through `tools/run.py` additionally needs a host `clang` (e.g. `brew install llvm`).
 
 ```bash
 python -m venv .venv
@@ -72,7 +72,7 @@ cmake -S . -B build -G Ninja \
 cmake --build build
 ```
 
-The wheel version is pinned in `requirements.txt`; the project tracks that snapshot of MLIR.
+The wheel version is pinned in `requirements.txt`; the project tracks that snapshot of MLIR, and sources are formatted with `clang-format` using the repository's `.clang-format`.
 
 ## The dialect
 
@@ -85,7 +85,7 @@ All ops and types live in the `match` dialect and are printed with the `match.` 
 | `match.match` | Groups a scrutinee value with `case` arms and a `default` region; selects the first arm whose pattern matches (and whose guard, if any, holds). |
 | `match.guard` | Splits an arm into a condition computation and a body: the arm fires only when the guard condition is true. |
 | `match.yield` | Terminates an arm or default region with the match's results. |
-| `match.deconstruct` | The runtime primitive: tests a value's constructor and projects its fields. Emitted by lowering; its runtime representation is deliberately out of scope. |
+| `match.deconstruct` | The runtime primitive: tests a value's constructor and projects its fields. Emitted by lowering, and given a runtime representation by `-match-to-llvm`. |
 
 A `case` header may declare the arm's bindings, which become the arm region's entry arguments:
 
@@ -125,17 +125,17 @@ Three conversion passes. The first two lower `match.match` to `scf` control flow
 
 ## Findings
 
-Now that we have a means to reduce the average number of tests per pattern matching construct, we can verify that the runtime of the program decreases accordingly (except in cases of high duplication) when applying maranget's algorithm.
+Now that we have a means to reduce the average number of tests per pattern matching construct, we can verify that the runtime of the program decreases accordingly (except in cases of small trees) when applying maranget's algorithm.
 
-| program shape | tests per value | naive | tree | speedup |
-| --- | --- | --- | --- | --- |
-| literal rows under one constructor | 10 → 6 | 106 ms | 95 ms | 1.1x |
-| sixteen such rows | 34 → 18 | 134 ms | 95 ms | 1.4x |
-| nested constructors | 28 → 12 | 121 ms | 73 ms | 1.7x |
-| full matrix over a pair of options | 30 → 16 | 148 ms | 78 ms | 1.9x |
-| a wider version of that matrix | 56 → 25 | 155 ms | 177 ms | 0.9x |
+| program | tests per value (mean) | tests per value (worst) | naive | maranget | speedup |
+| --- | --- | --- | --- | --- | --- |
+| four literal rows | 7.0 → 3.3 | 10 → 5 | 30 ms | 21 ms | 1.45x |
+| sixteen literal rows | 19.6 → 9.1 | 34 → 17 | 66 ms | 22 ms | 3.04x |
+| eight nested constructors | 18.1 → 5.5 | 28 → 10 | 64 ms | 25 ms | 2.51x |
+| full matrix over a pair | 19.2 → 4.2 | 30 → 6 | 45 ms | 52 ms | 0.86x |
+| a wider version of that matrix | 33.1 → 5.2 | 56 → 8 | 97 ms | 58 ms | 1.68x |
 
-Measured with `tools/bench/` over 50M values per run, best of five, at `-O1`. The last row is the case where duplicated arm bodies cost more than the saved checks.
+Runtime is measured with `tools/run.py programs/<shape>.mlir`: eight random inputs called on repeat, 50M calls, `clang -O1`, best of five.
 
 ## Repository layout
 
@@ -145,8 +145,8 @@ lib/Match/                op/type/attr implementations
 lib/Match/Conversion/     lowering passes (MatchToSCF, MatchToDecisionTree, MatchToLLVM)
 match-opt/                the mlir-opt-style driver for the dialect
 test/                     lit tests (verifier errors, round-trips, all three lowerings)
-programs/                 example programs with expected outputs
-tools/                    harnesses: run programs, compare and benchmark lowerings
+programs/                 programs to run: samples and generated matrices
+tools/                    the runner and the matrix generator (not part of the build)
 ```
 
 ## Running
@@ -161,11 +161,11 @@ build/bin/match-opt -convert-match-to-scf -match-to-llvm programs/literal-payloa
 build/bin/match-opt -match-to-decision-tree -convert-match-to-scf -match-to-llvm \
   programs/literal-payload.mlir
 ```
-Adding the `-match-to-llvm` pass after the transform passes ensures that the match dialect is fully eliminated from the IR, returning pure LLVM IR.
+Adding the `-match-to-llvm` pass after the transform passes removes the match dialect from the IR, leaving upstream MLIR dialects.
 
 ## Testing
 
-`tools/run-program.sh` runs a program, and `tools/bench/` measures the two lowerings against each other. Both sit outside the build and the lit suite, since timings are not reproducible in CI.
+`tools/run.py` runs a program from `programs/` on random inputs through both lowerings, checks that they compute the same results and reports the speedup. `tools/gen_programs.py` writes the larger matrices the speedup needs into `programs/`. Both sit outside the build and the lit suite, since timings are not reproducible in CI.
 
 The lit suite lives under `test/` and covers verifier diagnostics, assembly round-trips, and all three lowerings:
 
@@ -175,7 +175,7 @@ ninja -C build check-mlir-match
 
 ## Status and scope
 
-The dialect, its verifier and its three lowerings are implemented and covered by the lit suite: `match.match` compiles to `scf`, and a program can be lowered out of the dialect entirely, down to LLVM IR.
+The dialect, its verifier and its three lowerings are implemented and covered by the lit suite: `match.match` compiles to `scf`, and a program can be lowered out of the dialect entirely, into upstream MLIR dialects.
 
 Extensions that fit the current design:
 

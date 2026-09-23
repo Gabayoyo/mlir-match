@@ -27,13 +27,14 @@ namespace {
 #include <cmath>
 #include <iterator>
 
-// struct extends the OpConversionPattern class to provide a custom lowering for the DeconstructOp
+// struct extends the OpConversionPattern class to provide a custom lowering for
+// the DeconstructOp
 struct DeconstructOpLowering : public OpConversionPattern<DeconstructOp> {
-    using OpConversionPattern<DeconstructOp>::OpConversionPattern;
+  using OpConversionPattern<DeconstructOp>::OpConversionPattern;
 
-    LogicalResult matchAndRewrite(
-        DeconstructOp op, OpAdaptor adaptor,
-        ConversionPatternRewriter &rewriter) const override;
+  LogicalResult
+  matchAndRewrite(DeconstructOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override;
 };
 
 LogicalResult DeconstructOpLowering::matchAndRewrite(
@@ -51,8 +52,8 @@ LogicalResult DeconstructOpLowering::matchAndRewrite(
   if (!constructor)
     return rewriter.notifyMatchFailure(op, "unknown constructor");
 
-  // A type with more than one constructor carries a tag in slot 0, whose value
-  // is the constructor's position in the table.
+  // A type with more than one constructor keeps a tag in field 0, holding the
+  // constructor's position in the table.
   bool tagged = constructors.size() > 1;
   int64_t tag = 0;
   for (unsigned i = 0; i < constructors.size(); ++i)
@@ -62,26 +63,26 @@ LogicalResult DeconstructOpLowering::matchAndRewrite(
   Value container = adaptor.getValue();
   SmallVector<Value> results;
 
-  // result 0: the match flag
+  // result 0: the matched result
   if (tagged) {
+    // We create an extractValueOp for the structs
     Value tagValue = LLVM::ExtractValueOp::create(rewriter, loc, container,
-                                                 ArrayRef<int64_t>{0});
+                                                  ArrayRef<int64_t>{0});
     Value expected = arith::ConstantOp::create(
         rewriter, loc, rewriter.getI32IntegerAttr(static_cast<int32_t>(tag)));
-    results.push_back(arith::CmpIOp::create(rewriter, loc,
-                                            arith::CmpIPredicate::eq, tagValue,
-                                            expected));
+        
+    results.push_back(arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, tagValue, expected));
   } else {
     results.push_back(
         arith::ConstantOp::create(rewriter, loc, rewriter.getBoolAttr(true)));
   }
 
-  // one extract value op per field so each is accessible within the program
-  // each result is used by various arms who previously got their result from deconstructOp
+  // One extract per field: each replaces a result the arms already use.
   for (unsigned i = 0; i < constructor->fieldTypes.size(); ++i) {
     int64_t slot = tagged ? 1 + i : i;
-    results.push_back(LLVM::ExtractValueOp::create(
-        rewriter, loc, container, ArrayRef<int64_t>{slot}));
+    results.push_back(LLVM::ExtractValueOp::create(rewriter, loc, container,
+                                                   ArrayRef<int64_t>{slot}));
   }
 
   rewriter.replaceOp(op, results);
@@ -89,57 +90,63 @@ LogicalResult DeconstructOpLowering::matchAndRewrite(
 }
 
 struct MatchToLLVMPass : public impl::MatchToLLVMPassBase<MatchToLLVMPass> {
-    void runOnOperation() override {
-        MLIRContext *context = &getContext();
-        LLVMTypeConverter converter(&getContext());
+  void runOnOperation() override {
+    LLVMTypeConverter converter(&getContext());
+    configureMatchToLLVMTypeConverter(converter);
 
-        // `!match.option<T>`: a 32-bit tag followed by the payload slot, with
-        // `some` = 0 and `none` = 1.
-        converter.addConversion([&](OptionType type) -> std::optional<Type> {
-            Type payload = converter.convertType(type.getPayload());
-            if (!payload)
-                return std::nullopt;
-            return LLVM::LLVMStructType::getLiteral(
-                context, {IntegerType::get(context, 32), payload});
-        });
+    RewritePatternSet patterns(&getContext());
+    populateMatchToLLVMConversionPatterns(converter, patterns);
 
-        // `!match.pair<T1, T2>`: a struct with the two fields.
-        converter.addConversion([&](PairType type) -> std::optional<Type> {
-            Type first = converter.convertType(type.getFirst());
-            Type second = converter.convertType(type.getSecond());
-            if (!first || !second)
-                return std::nullopt;
-            return LLVM::LLVMStructType::getLiteral(context, {first, second});
-        });
+    // match-typed values enter through function signatures, so the func
+    // dialect has to be converted alongside the match ops.
+    populateFuncToLLVMConversionPatterns(converter, patterns);
 
-        RewritePatternSet patterns(&getContext());
-        populateMatchToLLVMConversionPatterns(converter, patterns);
+    ConversionTarget target(getContext());
+    configureMatchToLLVMConversionLegality(target);
 
-        // match-typed values enter through function signatures, so the func
-        // dialect has to be converted alongside the match ops.
-        populateFuncToLLVMConversionPatterns(converter, patterns);
-
-        ConversionTarget target(getContext());
-        configureMatchToLLVMConversionLegality(target);
-
-        if (failed(applyPartialConversion(getOperation(), target,
-                                          std::move(patterns)))) {
-            signalPassFailure();
-        }
+    if (failed(applyPartialConversion(getOperation(), target,
+                                      std::move(patterns)))) {
+      signalPassFailure();
     }
+  }
 };
 
 } // namespace
 
+void configureMatchToLLVMTypeConverter(LLVMTypeConverter &converter) {
+  MLIRContext *context = &converter.getContext();
+
+  // `!match.option<T>`: a 32-bit tag field followed by the payload, with
+  // `some` = 0 and `none` = 1.
+  converter.addConversion(
+      [context, &converter](OptionType type) -> std::optional<Type> {
+        Type payload = converter.convertType(type.getPayload());
+        if (!payload)
+          return std::nullopt;
+        return LLVM::LLVMStructType::getLiteral(
+            context, {IntegerType::get(context, 32), payload});
+      });
+
+  // `!match.pair<T1, T2>`: a struct with the two fields.
+  converter.addConversion(
+      [context, &converter](PairType type) -> std::optional<Type> {
+        Type first = converter.convertType(type.getFirst());
+        Type second = converter.convertType(type.getSecond());
+        if (!first || !second)
+          return std::nullopt;
+        return LLVM::LLVMStructType::getLiteral(context, {first, second});
+      });
+}
+
 void populateMatchToLLVMConversionPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns) {
-    patterns.add<DeconstructOpLowering>(converter, patterns.getContext());
+  patterns.add<DeconstructOpLowering>(converter, patterns.getContext());
 }
 
 void configureMatchToLLVMConversionLegality(ConversionTarget &target) {
-    target.addIllegalOp<MatchOp, GuardOp, YieldOp, DeconstructOp>();
-    target.addLegalDialect<arith::ArithDialect, scf::SCFDialect,
-                           LLVM::LLVMDialect>();
+  target.addIllegalOp<MatchOp, GuardOp, YieldOp, DeconstructOp>();
+  target.addLegalDialect<arith::ArithDialect, scf::SCFDialect,
+                         LLVM::LLVMDialect>();
 }
 
 std::unique_ptr<Pass> createMatchToLLVMPass() {

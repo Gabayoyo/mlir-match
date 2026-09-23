@@ -6,6 +6,14 @@
 namespace mlir {
 namespace match {
 
+// Which column a decision-tree test is applied to first.
+enum class ColumnChoice {
+  // Source column order.
+  Leftmost,
+  // The column that copies the fewest rows into its branches.
+  Mixture
+};
+
 #define GEN_PASS_DECL
 #include "Match/Conversion/MatchToDecisionTree/Passes.h.inc"
 

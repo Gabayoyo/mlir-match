@@ -4,7 +4,8 @@
 namespace mlir {
 namespace match {
 
-// each tagged type lists the constructors that can build its values, with their field types
+// each tagged type lists the constructors that can build its values, with their
+// field types
 SmallVector<ConstructorDescriptor> getConstructors(Type type) {
   SmallVector<ConstructorDescriptor> constructors;
   if (auto option = dyn_cast<OptionType>(type)) {
@@ -17,7 +18,8 @@ SmallVector<ConstructorDescriptor> getConstructors(Type type) {
   return constructors;
 }
 
-// look up a constructor by name for a given type, returning its descriptor if found
+// look up a constructor by name for a given type, returning its descriptor if
+// found
 std::optional<ConstructorDescriptor> lookupConstructor(Type type,
                                                        StringRef name) {
   for (const ConstructorDescriptor &constructor : getConstructors(type))

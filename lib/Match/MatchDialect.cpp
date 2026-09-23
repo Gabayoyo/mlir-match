@@ -22,11 +22,11 @@ void MatchDialect::initialize() {
 } // namespace mlir
 
 #define GET_ATTRDEF_CLASSES
-#include "Match/MatchAttrs.cpp.inc"       // attribute storage/accessors/TypeID
+#include "Match/MatchAttrs.cpp.inc" // attribute storage/accessors/TypeID
 
 #define GET_TYPEDEF_CLASSES
-#include "Match/MatchTypes.cpp.inc"       // type storage/accessors/TypeID
+#include "Match/MatchTypes.cpp.inc" // type storage/accessors/TypeID
 
 #define GET_OP_CLASSES
-#include "Match/MatchOpsDialect.cpp.inc"  // defines MatchDialect::MatchDialect(MLIRContext*)
-#include "Match/MatchOps.cpp.inc"         // defines generated op bodies (parse/print/adaptors)
+#include "Match/MatchOpsDialect.cpp.inc" // defines MatchDialect::MatchDialect(MLIRContext*)
+#include "Match/MatchOps.cpp.inc" // defines generated op bodies (parse/print/adaptors)

@@ -18,34 +18,39 @@ namespace {
 #define GEN_PASS_DEF_MATCHTOSCFPASS
 #include "Match/Conversion/MatchToSCF/Passes.h.inc"
 
-Value compilePattern(PatternAttr pattern, Value value, 
-                     OpBuilder &builder, SmallVectorImpl<Value> &bindings) {
-  if (pattern.getKind() == "bind") {
-    // add the value to the bindings list and return a true i1 value
-    bindings.push_back(value);
-    return arith::ConstantOp::create(builder, value.getLoc(),
-                                     builder.getBoolAttr(true));
-  } else if (pattern.getKind() == "wildcard") {
-    // return a true i1 value since it matches anything
-    return arith::ConstantOp::create(builder, value.getLoc(),
-                                     builder.getBoolAttr(true));
-  } else if (pattern.getKind() == "literal") {
-    // check if the value matches the literal
-    IntegerAttr payload = pattern.getPayload();
-    Value literalValue =
-        arith::ConstantOp::create(builder, value.getLoc(), payload);
-    return arith::CmpIOp::create(builder, value.getLoc(),
-                                 arith::CmpIPredicate::eq, value, literalValue);
-  } else {
-    // constructor case: c(s1, ... ,sn)
-    // emit match.deconstruct(value, "c")
+Value compilePattern(PatternAttr pattern, Value value, OpBuilder &builder,
+                     SmallVectorImpl<Value> &bindings) {
+  switch (getPatternKind(pattern)) {
+    case PatternKind::Bind:
+      // The value is captured, and the test always succeeds.
+      bindings.push_back(value);
+      return arith::ConstantOp::create(builder, value.getLoc(),
+                                      builder.getBoolAttr(true));
+    case PatternKind::Wildcard:
+      // Nothing is captured, and the test always succeeds.
+      return arith::ConstantOp::create(builder, value.getLoc(),
+                                      builder.getBoolAttr(true));
+    case PatternKind::Literal: {
+      // The value must equal the payload.
+      IntegerAttr payload = pattern.getPayload();
+      Value literalValue =
+          arith::ConstantOp::create(builder, value.getLoc(), payload);
+      return arith::CmpIOp::create(builder, value.getLoc(),
+                                  arith::CmpIPredicate::eq, value, literalValue);
+    }
+    case PatternKind::Constructor:
+      break;
+    }
+  {
+    // A constructor pattern deconstructs the value; its sub-patterns fold into
+    // the deconstruct's match flag.
     auto constructor = lookupConstructor(value.getType(), pattern.getKind());
 
     if (!constructor)
       llvm_unreachable(
           "validated pattern kind is not a constructor of the value's type");
 
-    // result types are {i1, fieldTypes...}
+    // Result types are {i1, field types...}.
     SmallVector<Type> resultTypes;
     resultTypes.push_back(builder.getI1Type());
     resultTypes.append(constructor->fieldTypes.begin(),
@@ -55,7 +60,6 @@ Value compilePattern(PatternAttr pattern, Value value,
         builder, value.getLoc(), resultTypes, value, pattern.getKind());
     Value cond = deconstructOp.getResult(0); // the %matched flag
 
-    // fold the subpatterns into the condition using and ops
     for (auto [subpattern, fieldValue] :
          llvm::zip(pattern.getSubpatterns(),
                    deconstructOp.getResults().drop_front())) {
@@ -106,16 +110,13 @@ ChainResult buildChain(MatchOp matchOp, unsigned armIndex,
 
     // An arm is terminal when it has no guard and its pattern (if any)
     // matches unconditionally - i.e. a "bind" or "wildcard" pattern
-    bool unconditional =
-        !guardOp &&
-        (!hasPattern || armPattern.getKind() == "bind" ||
-         armPattern.getKind() == "wildcard");
+    bool unconditional = !guardOp && (!hasPattern || isIrrefutable(armPattern));
 
     if (unconditional) {
       SmallVector<Value> bindings;
-      // An unconditional "bind" arm binds the scrutinee itself
-      // emgm case (v) => v ... where v can now be used in the body of the arm
-      if (armPattern && armPattern.getKind() == "bind")
+      // An unconditional bind arm binds the scrutinee itself, so the arm body
+      // can use the scrutinee directly.
+      if (armPattern && getPatternKind(armPattern) == PatternKind::Bind)
         bindings.push_back(matchOp.getScrutinee());
       emitBody(condSrc, condDst, builder, bindings);
       return std::nullopt;
@@ -158,8 +159,8 @@ ChainResult buildChain(MatchOp matchOp, unsigned armIndex,
 
     // The rest of the match goes into the if's else region.
     builder.setInsertionPointToEnd(&scfIf.getElseRegion().front());
-    ChainResult inner = buildChain(matchOp, armIndex + 1, defaultRegion,
-                                   builder);
+    ChainResult inner =
+        buildChain(matchOp, armIndex + 1, defaultRegion, builder);
     if (inner) {
       builder.setInsertionPointToEnd(&scfIf.getElseRegion().front());
       scf::YieldOp::create(builder, matchOp.getLoc(), ValueRange(*inner));
@@ -180,36 +181,31 @@ struct MatchToSCFPass : impl::MatchToSCFPassBase<MatchToSCFPass> {
   void runOnOperation() override {
     auto func = getOperation();
     SmallVector<MatchOp> matchOps;
-    func.walk([&](MatchOp matchOp) {
-      matchOps.push_back(matchOp);
-    });
+    func.walk([&](MatchOp matchOp) { matchOps.push_back(matchOp); });
 
     for (MatchOp matchOp : matchOps) {
       OpBuilder builder(matchOp.getOperation());
 
       // A first arm that always matches (no guard, no conditional pattern)
       // is inlined in place of the match, as is the default with no arms.
-      Region &unconditional =
-          !matchOp.getArms().empty() ? matchOp.getArms().front()
-                                     : matchOp.getOtherwise();
+      Region &unconditional = !matchOp.getArms().empty()
+                                  ? matchOp.getArms().front()
+                                  : matchOp.getOtherwise();
       auto patterns = matchOp.getPatterns();
       PatternAttr firstPattern;
       if (patterns && !patterns->empty())
         firstPattern = cast<PatternAttr>((*patterns)[0]);
-      bool unconditionalArm =
-          matchOp.getArms().empty() ||
-          (!hasGuard(unconditional) &&
-           (!firstPattern || firstPattern.getKind() == "bind" ||
-            firstPattern.getKind() == "wildcard"));
+      bool unconditionalArm = matchOp.getArms().empty() ||
+                              (!hasGuard(unconditional) &&
+                               (!firstPattern || isIrrefutable(firstPattern)));
       if (unconditionalArm) {
         Block &dst = *builder.getInsertionBlock();
         auto yield = cast<YieldOp>(unconditional.front().getTerminator());
 
-        // An inlined "bind" arm binds the scrutinee itself. Rewrite the arm's
-        // arguments first, so the yield's results reference live values once
-        // the match is erased.
+        // An inlined bind arm binds the scrutinee itself; rewriting the arm's
+        // arguments first keeps its yield referencing live values.
         SmallVector<Value> bindings;
-        if (firstPattern && firstPattern.getKind() == "bind")
+        if (firstPattern && getPatternKind(firstPattern) == PatternKind::Bind)
           bindings.push_back(matchOp.getScrutinee());
         for (auto [argument, binding] :
              llvm::zip(unconditional.front().getArguments(), bindings))
@@ -227,8 +223,8 @@ struct MatchToSCFPass : impl::MatchToSCFPassBase<MatchToSCFPass> {
         continue;
       }
 
-      ChainResult results = buildChain(matchOp, 0, matchOp.getOtherwise(),
-                                       builder);
+      ChainResult results =
+          buildChain(matchOp, 0, matchOp.getOtherwise(), builder);
       if (results) {
         matchOp.replaceAllUsesWith(*results);
         matchOp.erase();

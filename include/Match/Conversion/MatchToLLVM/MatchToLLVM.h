@@ -8,6 +8,10 @@ class RewritePatternSet;
 
 namespace match {
 
+// Register how the match types are represented in LLVM: the tag they carry,
+// how many fields they have, and the types of those fields.
+void configureMatchToLLVMTypeConverter(LLVMTypeConverter &converter);
+
 // Configure the target: which dialects and ops must be gone by the end.
 void configureMatchToLLVMConversionLegality(ConversionTarget &target);
 

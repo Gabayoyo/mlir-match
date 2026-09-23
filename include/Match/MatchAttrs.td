@@ -5,10 +5,8 @@ include "MatchDialect.td"
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/CommonAttrConstraints.td"
 
-// A structured pattern describing the shape of a value an arm matches. A
-// pattern is data (an MLIR attribute), not runtime code: it is what a
-// decision-tree pass reads and reorders, and it defines the bindings an arm's
-// body expects.
+// A pattern is data (an MLIR attribute), not runtime code: the lowering reads
+// and reorders it, and it defines the bindings an arm's body expects.
 def Match_Pattern : AttrDef<Match_Dialect, "Pattern"> {
   let summary = "A pattern describing the shape of a value an arm matches.";
   let description = [{
@@ -23,9 +21,8 @@ def Match_Pattern : AttrDef<Match_Dialect, "Pattern"> {
   // literal payload can be validated when the attribute is built.
   let genVerifyDecl = 1;
 
-  // kind is "wildcard", "bind", "literal", or a constructor name
-  // payload is the constant a "literal" pattern matches
-  // sub-patterns are the patterns that a constructor pattern deconstructs into
+  // kind is a structural tag or a constructor name, payload is the constant a
+  // "literal" matches, and sub-patterns is a constructor's fields.
   let parameters = (ins
       "StringRef":$kind,
       OptionalParameter<"::mlir::IntegerAttr", "payload">:$payload,

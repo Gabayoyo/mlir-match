@@ -8,30 +8,46 @@
 namespace mlir {
 namespace match {
 
+// The structural kinds, as spelled in the attribute's assembly.
+static constexpr StringLiteral kBindKind = "bind";
+static constexpr StringLiteral kWildcardKind = "wildcard";
+static constexpr StringLiteral kLiteralKind = "literal";
+
+PatternKind getPatternKind(PatternAttr pattern) {
+  StringRef kind = pattern.getKind();
+  if (kind == kBindKind)
+    return PatternKind::Bind;
+  if (kind == kWildcardKind)
+    return PatternKind::Wildcard;
+  if (kind == kLiteralKind)
+    return PatternKind::Literal;
+  return PatternKind::Constructor;
+}
+
+// a pattern is irrefutable if it is a bind or wildcard i.e. always matches
+bool isIrrefutable(PatternAttr pattern) {
+  PatternKind kind = getPatternKind(pattern);
+  return kind == PatternKind::Bind || kind == PatternKind::Wildcard;
+}
+
 // Structural kinds are closed: no sub-patterns, and only "literal" carries a
 // payload, which is mandatory for it. Other kinds are constructor patterns.
 LogicalResult PatternAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                   StringRef kind, IntegerAttr payload,
                                   ArrayRef<PatternAttr> subpatterns) {
   bool isStructural =
-      kind == "bind" || kind == "wildcard" || kind == "literal";
+      kind == kBindKind || kind == kWildcardKind || kind == kLiteralKind;
   if (isStructural && !subpatterns.empty())
-    return emitError() << "a '" << kind
-                       << "' pattern cannot have sub-patterns";
-  if (payload && kind != "literal")
+    return emitError() << "a '" << kind << "' pattern cannot have sub-patterns";
+  if (payload && kind != kLiteralKind)
     return emitError() << "only a 'literal' pattern can carry a payload";
-  if (kind == "literal" && !payload)
+  if (kind == kLiteralKind && !payload)
     return emitError() << "a 'literal' pattern must carry a payload";
   return success();
 }
 
-// Custom assembly for PatternAttr, since the generated form cannot parse a
-// StringRef / self-referential parameter list. Grammar (after the
-// `#match.pattern` mnemonic):
-//
-//   `<` kind (`,` attribute)? (`(` pattern (`,` pattern)* `)`)? `>`
-//
-// The optional attribute is the "literal" payload (e.g. `3 : i32`).
+// Custom assembly, since the generated form cannot parse a StringRef or a
+// self-referential list: `<` kind (`,` attr)? (`(` pattern ... `)`)? `>`
 Attribute PatternAttr::parse(AsmParser &odsParser, Type odsType) {
   Builder builder(odsParser.getContext());
   SMLoc loc = odsParser.getCurrentLocation();
@@ -39,9 +55,8 @@ Attribute PatternAttr::parse(AsmParser &odsParser, Type odsType) {
   if (odsParser.parseLess())
     return {};
 
-  // `kind` is a free-form tag, written as a keyword or quoted string. The
-  // StringRef stored in the attribute must outlive the parse, so intern it in
-  // the context.
+  // `kind` is a free-form tag, interned so the attribute's StringRef outlives
+  // the parse.
   std::string kindStr;
   if (odsParser.parseKeywordOrString(&kindStr))
     return {};
@@ -98,9 +113,9 @@ void PatternAttr::print(AsmPrinter &odsPrinter) const {
   }
   if (!getSubpatterns().empty()) {
     odsPrinter << " (";
-    llvm::interleaveComma(
-        getSubpatterns(), odsPrinter,
-        [&](PatternAttr sub) { odsPrinter.printAttribute(sub); });
+    llvm::interleaveComma(getSubpatterns(), odsPrinter, [&](PatternAttr sub) {
+      odsPrinter.printAttribute(sub);
+    });
     odsPrinter << ')';
   }
   odsPrinter << '>';

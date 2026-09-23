@@ -8,10 +8,8 @@
 namespace mlir {
 namespace match {
 
-// Clone `src`'s body ops into `dst` and terminate `dst` with an scf.yield,
-// rewriting the arm's bindings (`src`'s entry arguments) onto `bindings`. Ops
-// before a guard compute its condition and are the caller's to hoist, so the
-// arm stays intact and can be emitted more than once.
+// Clone `src`'s body ops into `dst`, terminated by an scf.yield, rewriting its
+// bindings onto `bindings`; ops before a guard stay the caller's to hoist.
 void emitBody(Block &src, Block &dst, OpBuilder &builder,
               ArrayRef<Value> bindings = {});
 

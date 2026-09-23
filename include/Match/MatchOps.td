@@ -39,10 +39,8 @@ def Match_MatchOp : Match_Op<"match", [
     // case/default keywords around regions need a hand-written parse/print.
     let hasCustomAssemblyFormat = 1;
 
-    // RegionBranchOpInterface has no default for getSuccessorRegions
-    // so we use extraClassDeclaration here to add the getSuccessorRegions method
-    // to the generated MatchOp class, which is required by the RegionBranchOpInterface
-    // (has to be added manually in this way)
+    // RegionBranchOpInterface declares getSuccessorRegions without a default,
+    // so it is added to the generated class here.
     let extraClassDeclaration = [{
         using ::mlir::RegionBranchOpInterface::Trait<MatchOp>::getSuccessorRegions;
         void getSuccessorRegions(

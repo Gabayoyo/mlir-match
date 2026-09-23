@@ -27,9 +27,8 @@ struct ConstructorDescriptor {
 // constructors, so the result is empty.
 SmallVector<ConstructorDescriptor> getConstructors(Type type);
 
-// Returns the constructor of `type` named `name`, or std::nullopt when `type`
-// does not declare one (including when `type` is not a tagged match type at
-// all).
+// Returns the constructor of `type` named `name`, or std::nullopt when the
+// type does not declare one, including when it is not a tagged type.
 std::optional<ConstructorDescriptor> lookupConstructor(Type type,
                                                        StringRef name);
 

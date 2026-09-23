@@ -628,24 +628,25 @@ PathResult emitNode(const DecisionNode &node, SmallVectorImpl<Value> &slots,
 PathResult emitCtorTest(const DecisionNode &node, SmallVectorImpl<Value> &slots,
                         MatchOp match, OpBuilder &builder, unsigned index) {
 
-  // get the constructor type                      
+  // get the constructor type
   auto descriptorOpt =
       lookupConstructor(slots[node.slot].getType(), node.ctors[index]);
   assert(descriptorOpt && "tree-eligible constructor must exist");
   const ConstructorDescriptor &descriptor = *descriptorOpt;
 
-  // Gather types of the descriptor so we know the result types of the deconstruct op.
-  // I1 Type always due to %matched, the bool for if it matches the ctor
+  // Gather types of the descriptor so we know the result types of the
+  // deconstruct op. I1 Type always due to %matched, the bool for if it matches
+  // the ctor
   SmallVector<Type> deconstructTypes{builder.getI1Type()};
   deconstructTypes.append(descriptor.fieldTypes.begin(),
                           descriptor.fieldTypes.end());
 
-  // make deconstruct op                        
+  // make deconstruct op
   auto deconstruct =
       match::DeconstructOp::create(builder, match.getLoc(), deconstructTypes,
                                    slots[node.slot], node.ctors[index]);
 
-  // make the if op and set it based on the match.deconstruct's %matched                             
+  // make the if op and set it based on the match.deconstruct's %matched
   auto scfIf = scf::IfOp::create(
       builder, match.getLoc(),
       SmallVector<Type>(match.getResultTypes().begin(),
